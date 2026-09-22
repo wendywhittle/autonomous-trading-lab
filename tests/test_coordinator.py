@@ -55,10 +55,7 @@ class AcceptedBroker:
         )
 
     def reconcile(self, broker_order_ids):
-        return tuple(
-            self.get_order(order_id)
-            for order_id in broker_order_ids
-        )
+        return tuple(self.get_order(order_id) for order_id in broker_order_ids)
 
 
 def req():
@@ -74,7 +71,7 @@ def req():
 def coordinator(tmp_path, broker):
     store = ExecutionIntentStore(tmp_path / "intents.json")
     ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
-    return ExecutionCoordinator(store, broker), store, ledger
+    return ExecutionCoordinator(store, broker, ledger), store, ledger
 
 
 def test_coordinator_persists_intent_before_submission(tmp_path):
