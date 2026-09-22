@@ -131,7 +131,7 @@ def test_risk_blocks_daily_loss_and_drawdown():
     assert daily.reason == "DAILY_LOSS_LIMIT"
 
     drawdown = engine.evaluate(
-        decision, 100, 1, equity=890, session_start_equity=1000, high_water_mark=1000
+        decision, 100, 1, equity=890, session_start_equity=900, high_water_mark=1000
     )
     assert not drawdown.approved
     assert drawdown.reason == "DRAWDOWN_LIMIT"
