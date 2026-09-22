@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,7 +13,7 @@ from atlab.runtime import PaperTradingEngine, TradingMode
 def obs(price, second):
     return MarketObservation(
         symbol="TEST",
-        timestamp=datetime.fromtimestamp(second, tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(second, tz=UTC),
         price=price,
         source="test",
     )
