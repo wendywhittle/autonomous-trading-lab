@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Side(str, Enum):
@@ -43,6 +43,8 @@ class MarketState(BaseModel):
 
 
 class StrategyVersion(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     strategy_id: str
     version: str
     hypothesis: str
