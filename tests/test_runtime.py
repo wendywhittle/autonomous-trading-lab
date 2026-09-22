@@ -35,7 +35,7 @@ def test_paper_engine_runs_end_to_end(tmp_path):
         strategy(),
         DeterministicRiskEngine(),
         PaperPortfolio(1000),
-        ImmutableLedger(tmp_path / "ledger.jsonl"),
+        ImmutableLedger(tmp_path / "ledger.sqlite3"),
         quantity=2,
     )
 
@@ -62,7 +62,7 @@ def test_paper_engine_is_repeatable(tmp_path):
             strategy(),
             DeterministicRiskEngine(),
             PaperPortfolio(1000),
-            ImmutableLedger(tmp_path / f"{name}.jsonl"),
+            ImmutableLedger(tmp_path / f"{name}.sqlite3"),
         )
         results.append(engine.run("TEST"))
 
@@ -81,7 +81,7 @@ def test_paper_engine_rejects_non_paper_modes(tmp_path):
             strategy(),
             DeterministicRiskEngine(),
             PaperPortfolio(1000),
-            ImmutableLedger(tmp_path / "ledger.jsonl"),
+            ImmutableLedger(tmp_path / "ledger.sqlite3"),
             mode=TradingMode.LIVE_DISABLED,
         )
 
@@ -162,7 +162,7 @@ def test_risk_limits_are_strict_boundaries():
 
 def test_paper_engine_does_not_reprocess_recorded_decisions(tmp_path):
     observations = [obs(100, 1), obs(101, 2), obs(102, 3)]
-    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
     first = PaperTradingEngine(
         InMemoryMarketData(observations),
         strategy(),
