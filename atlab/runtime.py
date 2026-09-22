@@ -122,7 +122,16 @@ class PaperTradingEngine:
             )
 
             if risk_result.approved:
-                order = self.execution.submit(decision, self.quantity, price)
+                try:
+                    order = self.execution.submit(decision, self.quantity, price)
+                except RuntimeError as exc:
+                    if str(exc) == "KILL_SWITCH_ACTIVE":
+                        self.ledger.append(
+                            "KILL_SWITCH",
+                            f"kill-{decision.decision_id}",
+                            {"decision_id": decision.decision_id, "reason": str(exc)},
+                        )
+                    raise
                 snapshot = self.portfolio.apply(order)
                 self.ledger.append(
                     "ORDER",
