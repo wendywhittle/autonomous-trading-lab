@@ -9,6 +9,8 @@ from atlab.models import MarketObservation, StrategyVersion
 from atlab.paper import PaperExecution
 from atlab.portfolio import PaperPortfolio
 from atlab.registry import StrategyRegistry
+from atlab.ledger import ImmutableLedger
+from atlab.replay import replay
 from atlab.state import build_state
 from atlab.strategy import make_decision
 
@@ -92,3 +94,19 @@ def test_registered_strategy_parameters_cannot_mutate_registry_state():
     assert registry.get("momentum", "1.0.0").parameters["entry_return"] == 0.001
 
 
+
+
+
+def test_ledger_rejects_duplicate_event_ids(tmp_path):
+    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    ledger.append("TEST", "event-1", {"value": 1})
+    with pytest.raises(ValueError, match="LEDGER_EVENT_ID_EXISTS"):
+        ledger.append("TEST", "event-1", {"value": 2})
+
+
+def test_replay_rejects_duplicate_event_ids(tmp_path):
+    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    first = ledger.append("TEST", "event-1", {})
+    duplicate = first.model_copy(update={"sequence": 1})
+    with pytest.raises(ValueError, match="LEDGER_EVENT_ID_DUPLICATE"):
+        replay([first, duplicate])
