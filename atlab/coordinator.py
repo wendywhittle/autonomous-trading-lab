@@ -78,7 +78,7 @@ class ExecutionCoordinator:
 
         try:
             result = self.broker.submit(request)
-        except Exception:
+        except (ConnectionError, OSError, RuntimeError, TimeoutError):
             result = BrokerOrderResult(
                 accepted=False,
                 broker_order_id=None,
