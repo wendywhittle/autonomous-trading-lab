@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -41,7 +41,7 @@ class RiskSessionState:
         temporary.replace(target)
 
     @classmethod
-    def load(cls, path: str | Path) -> "RiskSessionState":
+    def load(cls, path: str | Path) -> RiskSessionState:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         required = {"session_start_equity", "high_water_mark", "current_equity"}
         if set(data) != required:
