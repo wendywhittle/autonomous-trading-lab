@@ -2,10 +2,41 @@ from atlab.broker import (
     BrokerMode,
     BrokerOrderRequest,
     BrokerOrderStatus,
+    BrokerAdapter,
     DisabledBroker,
+    IdempotentBroker,
     paper_request,
 )
 from atlab.models import OrderStatus, PaperOrder, Side
+
+
+class CountingBroker:
+    mode = BrokerMode.LIVE
+
+    def __init__(self):
+        self.submissions = 0
+
+    def submit(self, request):
+        self.submissions += 1
+        return type(
+            "Result",
+            (),
+            {
+                "accepted": True,
+                "broker_order_id": f"broker-{self.submissions}",
+                "status": BrokerOrderStatus.ACCEPTED,
+                "message": "ACCEPTED",
+            },
+        )()
+
+    def cancel(self, broker_order_id):
+        return True
+
+    def get_order(self, broker_order_id):
+        raise AssertionError("not used")
+
+    def reconcile(self, broker_order_ids):
+        return ()
 
 
 def test_disabled_broker_never_accepts_orders():
@@ -57,3 +88,48 @@ def test_paper_order_maps_to_provider_independent_request():
     assert request.side is Side.BUY
     assert request.quantity == 2
     assert request.price == 101.5
+
+
+def test_idempotent_broker_submits_same_key_only_once():
+    adapter = CountingBroker()
+    broker = IdempotentBroker(adapter)
+    request = BrokerOrderRequest(
+        idempotency_key="intent-1",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=1,
+        price=100,
+    )
+
+    first = broker.submit(request)
+    second = broker.submit(request)
+
+    assert first == second
+    assert adapter.submissions == 1
+
+
+def test_idempotent_broker_rejects_conflicting_reuse_of_key():
+    adapter = CountingBroker()
+    broker = IdempotentBroker(adapter)
+    first_request = BrokerOrderRequest(
+        idempotency_key="intent-1",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=1,
+        price=100,
+    )
+    conflicting_request = BrokerOrderRequest(
+        idempotency_key="intent-1",
+        symbol="TEST",
+        side=Side.SELL,
+        quantity=1,
+        price=100,
+    )
+
+    broker.submit(first_request)
+    result = broker.submit(conflicting_request)
+
+    assert not result.accepted
+    assert result.status is BrokerOrderStatus.REJECTED
+    assert result.message == "IDEMPOTENCY_KEY_CONFLICT"
+    assert adapter.submissions == 1
