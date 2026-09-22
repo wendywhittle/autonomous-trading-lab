@@ -7,6 +7,8 @@ from .models import DecisionAction, JEVDecision, RiskDecision, Side
 class RiskLimits:
     max_position_notional: float = 10_000
     max_order_notional: float = 2_500
+    max_daily_loss: float = 500
+    max_drawdown: float = 1_000
 
 
 class DeterministicRiskEngine:
@@ -21,11 +23,34 @@ class DeterministicRiskEngine:
         price: float,
         quantity: float,
         current_position_notional: float = 0,
+        *,
+        equity: float | None = None,
+        session_start_equity: float | None = None,
+        high_water_mark: float | None = None,
     ) -> RiskDecision:
         if price <= 0 or quantity <= 0:
             return RiskDecision(approved=False, reason="INVALID_ORDER_SIZE", max_notional=0)
         if current_position_notional < 0:
             return RiskDecision(approved=False, reason="INVALID_POSITION", max_notional=0)
+
+        if equity is not None and session_start_equity is not None:
+            daily_loss = session_start_equity - equity
+            if daily_loss > self.limits.max_daily_loss:
+                return RiskDecision(
+                    approved=False,
+                    reason="DAILY_LOSS_LIMIT",
+                    max_notional=0,
+                )
+
+        if equity is not None and high_water_mark is not None:
+            drawdown = high_water_mark - equity
+            if drawdown > self.limits.max_drawdown:
+                return RiskDecision(
+                    approved=False,
+                    reason="DRAWDOWN_LIMIT",
+                    max_notional=0,
+                )
+
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(approved=False, reason="HOLD_DECISION", max_notional=0)
 
