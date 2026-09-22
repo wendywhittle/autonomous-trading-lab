@@ -1,23 +1,33 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
+from atlab.adapters import InMemoryMarketData
 from atlab.backtest import run_backtest
 from atlab.models import MarketObservation, StrategyVersion
+from atlab.paper import PaperExecution
 from atlab.portfolio import PaperPortfolio
 from atlab.registry import StrategyRegistry
-from atlab.adapters import InMemoryMarketData
-from atlab.paper import PaperExecution
-from atlab.strategy import make_decision
 from atlab.state import build_state
+from atlab.strategy import make_decision
 
 
 def obs(price, second):
-    return MarketObservation(symbol="TEST", timestamp=datetime.fromtimestamp(second, tz=timezone.utc), price=price, source="test")
+    return MarketObservation(
+        symbol="TEST",
+        timestamp=datetime.fromtimestamp(second, tz=UTC),
+        price=price,
+        source="test",
+    )
 
 
 def strategy():
-    return StrategyVersion(strategy_id="momentum", version="1.0.0", hypothesis="test", parameters={"entry_return": 0.001})
+    return StrategyVersion(
+        strategy_id="momentum",
+        version="1.0.0",
+        hypothesis="test",
+        parameters={"entry_return": 0.001},
+    )
 
 
 def test_adapter_is_provider_independent():
@@ -29,7 +39,13 @@ def test_registry_rejects_mutating_existing_version():
     registry = StrategyRegistry()
     registry.register(strategy())
     with pytest.raises(ValueError, match="STRATEGY_VERSION_IMMUTABLE"):
-        registry.register(StrategyVersion(strategy_id="momentum", version="1.0.0", hypothesis="changed"))
+        registry.register(
+            StrategyVersion(
+                strategy_id="momentum",
+                version="1.0.0",
+                hypothesis="changed",
+            )
+        )
 
 
 def test_backtest_uses_only_available_history():
