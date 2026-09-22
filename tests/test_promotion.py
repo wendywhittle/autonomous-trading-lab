@@ -9,6 +9,8 @@ def evidence(**overrides):
         "kill_switch_verified": True,
         "replay_deterministic": True,
         "no_live_credentials": True,
+        "live_execution_implemented": False,
+        "live_controls_verified": False,
     }
     values.update(overrides)
     return PromotionEvidence(**values)
@@ -28,7 +30,12 @@ def test_promotion_gate_blocks_missing_evidence():
     assert result.failed_requirements == ("REPLAY_NOT_DETERMINISTIC",)
 
 
-def test_live_promotion_requires_explicit_human_approval():
-    result = PromotionGate().evaluate(evidence(), PromotionMode.LIVE)
+def test_live_promotion_requires_explicit_human_approval_and_live_controls():
+    result = PromotionGate().evaluate(
+        evidence(human_approval=True), PromotionMode.LIVE
+    )
     assert not result.eligible
-    assert result.failed_requirements == ("HUMAN_APPROVAL_REQUIRED",)
+    assert result.failed_requirements == (
+        "LIVE_EXECUTION_NOT_IMPLEMENTED",
+        "LIVE_CONTROLS_NOT_VERIFIED",
+    )
