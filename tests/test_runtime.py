@@ -158,3 +158,30 @@ def test_risk_limits_are_strict_boundaries():
         decision, 100, 1, equity=950, session_start_equity=1000, high_water_mark=1000
     )
     assert result.approved
+
+
+def test_paper_engine_does_not_reprocess_recorded_decisions(tmp_path):
+    observations = [obs(100, 1), obs(101, 2), obs(102, 3)]
+    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    first = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+    )
+    first_results = first.run("TEST")
+    second_portfolio = PaperPortfolio(0)
+    second = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        second_portfolio,
+        ledger,
+    )
+    second_results = second.run("TEST")
+
+    assert len(first_results) == 2
+    assert second_results == ()
+    assert second_portfolio.position_quantity == 0
+    assert len(ledger.read()) == 4
