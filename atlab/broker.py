@@ -13,6 +13,15 @@ class BrokerMode(str, Enum):
     LIVE = "LIVE"
 
 
+class BrokerOrderStatus(str, Enum):
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    CANCELED = "CANCELED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True)
 class BrokerOrderRequest:
     idempotency_key: str
@@ -26,7 +35,7 @@ class BrokerOrderRequest:
 class BrokerOrderResult:
     accepted: bool
     broker_order_id: str | None
-    status: str
+    status: BrokerOrderStatus
     message: str
 
 
@@ -53,7 +62,7 @@ class DisabledBroker:
         return BrokerOrderResult(
             accepted=False,
             broker_order_id=None,
-            status="DISABLED",
+            status=BrokerOrderStatus.REJECTED,
             message="LIVE_BROKER_DISABLED",
         )
 
@@ -64,14 +73,12 @@ class DisabledBroker:
         return BrokerOrderResult(
             accepted=False,
             broker_order_id=broker_order_id,
-            status="DISABLED",
+            status=BrokerOrderStatus.UNKNOWN,
             message="LIVE_BROKER_DISABLED",
         )
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
-        return tuple(
-            self.get_order(order_id) for order_id in broker_order_ids
-        )
+        return tuple(self.get_order(order_id) for order_id in broker_order_ids)
 
 
 def paper_request(order: PaperOrder) -> BrokerOrderRequest:
