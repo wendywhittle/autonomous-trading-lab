@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
 
-from .broker import BrokerAdapter, BrokerOrderRequest, BrokerOrderResult
+from .broker import (
+    BrokerAdapter,
+    BrokerOrderRequest,
+    BrokerOrderResult,
+    BrokerOrderStatus,
+)
 from .execution import ExecutionIntentStore
 
 
@@ -47,7 +51,7 @@ class ExecutionCoordinator:
                 BrokerOrderResult(
                     accepted=False,
                     broker_order_id=None,
-                    status=self._unknown_status(),
+                    status=BrokerOrderStatus.UNKNOWN,
                     message="BROKER_SUBMISSION_UNKNOWN",
                 ),
             )
@@ -60,9 +64,3 @@ class ExecutionCoordinator:
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
         return self.broker.reconcile(broker_order_ids)
-
-    @staticmethod
-    def _unknown_status():
-        from .broker import BrokerOrderStatus
-
-        return BrokerOrderStatus.UNKNOWN
