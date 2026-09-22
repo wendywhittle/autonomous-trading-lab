@@ -96,7 +96,7 @@ def reconcile_portfolio(
     expected_average_cost = 0.0
     expected_realized_pnl = 0.0
 
-    for order in sorted(orders, key=lambda item: item.order_id):
+    for order in orders:
         if order.order_id not in applied_ids:
             continue
         if order.side is Side.BUY:
