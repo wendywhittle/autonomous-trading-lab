@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from .adapters import MarketDataAdapter
 from .ledger import ImmutableLedger
@@ -9,6 +10,7 @@ from .models import JEVDecision, PaperOrder, StrategyVersion
 from .paper import PaperExecution
 from .portfolio import PaperPortfolio
 from .risk import DeterministicRiskEngine
+from .risk_state import RiskSessionState
 
 
 class TradingMode(str, Enum):
@@ -26,7 +28,7 @@ class CycleResult:
 
 
 class PaperTradingEngine:
-    """Sequential autonomous paper loop with no live execution path."""
+    """Sequential autonomous paper loop with persisted portfolio and risk state."""
 
     def __init__(
         self,
@@ -39,6 +41,8 @@ class PaperTradingEngine:
         quantity: float = 1.0,
         kill_switch: bool = False,
         mode: TradingMode = TradingMode.PAPER,
+        portfolio_state_path: str | Path | None = None,
+        risk_state_path: str | Path | None = None,
     ):
         if mode is not TradingMode.PAPER:
             raise ValueError("PAPER_ENGINE_REQUIRES_PAPER_MODE")
@@ -51,6 +55,19 @@ class PaperTradingEngine:
         self.ledger = ledger
         self.quantity = quantity
         self.execution = PaperExecution(kill_switch=kill_switch)
+        self.portfolio_state_path = (
+            Path(portfolio_state_path) if portfolio_state_path else None
+        )
+        self.risk_state_path = Path(risk_state_path) if risk_state_path else None
+        self.risk_session = (
+            RiskSessionState.load(self.risk_state_path)
+            if self.risk_state_path and self.risk_state_path.exists()
+            else None
+        )
+        if self.portfolio_state_path and self.portfolio_state_path.exists():
+            self.portfolio.load_state(self.portfolio_state_path)
+        elif self.portfolio_state_path:
+            self.portfolio.save_state(self.portfolio_state_path)
 
     def run(self, symbol: str) -> tuple[CycleResult, ...]:
         from .state import build_state
@@ -69,12 +86,32 @@ class PaperTradingEngine:
             )
             decision = make_decision(self.strategy, state)
             price = state.price
+            pre_trade_snapshot = self.portfolio.snapshot(price)
+
+            if self.risk_session is None:
+                self.risk_session = RiskSessionState(
+                    session_start_equity=pre_trade_snapshot.equity,
+                    high_water_mark=pre_trade_snapshot.equity,
+                    current_equity=pre_trade_snapshot.equity,
+                )
+            else:
+                self.risk_session = RiskSessionState(
+                    session_start_equity=self.risk_session.session_start_equity,
+                    high_water_mark=max(
+                        self.risk_session.high_water_mark, pre_trade_snapshot.equity
+                    ),
+                    current_equity=pre_trade_snapshot.equity,
+                )
+
             current_position_notional = self.portfolio.position_quantity * price
             risk_result = self.risk.evaluate(
                 decision,
                 price,
                 self.quantity,
                 current_position_notional,
+                equity=pre_trade_snapshot.equity,
+                session_start_equity=self.risk_session.session_start_equity,
+                high_water_mark=self.risk_session.high_water_mark,
             )
             order = None
 
@@ -94,12 +131,22 @@ class PaperTradingEngine:
                 )
                 equity = snapshot.equity
             else:
-                equity = self.portfolio.snapshot(price).equity
+                equity = pre_trade_snapshot.equity
                 self.ledger.append(
                     "RISK_BLOCK",
                     f"risk-{decision.decision_id}",
                     {"decision_id": decision.decision_id, "reason": risk_result.reason},
                 )
+
+            self.risk_session = RiskSessionState(
+                session_start_equity=self.risk_session.session_start_equity,
+                high_water_mark=max(self.risk_session.high_water_mark, equity),
+                current_equity=equity,
+            )
+            if self.portfolio_state_path:
+                self.portfolio.save_state(self.portfolio_state_path)
+            if self.risk_state_path:
+                self.risk_session.save(self.risk_state_path)
 
             results.append(
                 CycleResult(
