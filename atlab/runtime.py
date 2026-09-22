@@ -85,6 +85,8 @@ class PaperTradingEngine:
                 as_of=observations[index].timestamp,
             )
             decision = make_decision(self.strategy, state)
+            if self.ledger.contains_event_id(decision.decision_id):
+                continue
             price = state.price
             pre_trade_snapshot = self.portfolio.snapshot(price)
 
