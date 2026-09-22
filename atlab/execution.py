@@ -32,7 +32,7 @@ class ExecutionIntentStore:
             return {}
         data = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            raise ValueError("INVALID_EXECUTION_INTENT_STATE")
+            raise TypeError("INVALID_EXECUTION_INTENT_STATE")
         return data
 
     def record(self, request: BrokerOrderRequest) -> ExecutionIntent:
