@@ -1,4 +1,4 @@
-from atlab.broker import BrokerOrderRequest, BrokerOrderStatus
+from atlab.broker import BrokerOrderRequest
 from atlab.execution import ExecutionIntentStore
 from atlab.models import Side
 
