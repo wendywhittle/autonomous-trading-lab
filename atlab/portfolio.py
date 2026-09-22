@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 
 from .models import PaperOrder, Side
 
@@ -39,6 +41,37 @@ class PaperPortfolio:
             if self.position_quantity == 0:
                 self.average_cost = 0.0
         return self.snapshot(order.fill_price)
+
+    def state(self) -> dict[str, float]:
+        return {
+            "cash": self.cash,
+            "position_quantity": self.position_quantity,
+            "average_cost": self.average_cost,
+            "realized_pnl": self.realized_pnl,
+        }
+
+    def save_state(self, path: str | Path) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(self.state(), sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+
+    def load_state(self, path: str | Path) -> None:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        required = {"cash", "position_quantity", "average_cost", "realized_pnl"}
+        if set(data) != required:
+            raise ValueError("INVALID_PORTFOLIO_STATE")
+        values = {key: float(data[key]) for key in required}
+        if values["cash"] < 0 or values["position_quantity"] < 0 or values["average_cost"] < 0:
+            raise ValueError("INVALID_PORTFOLIO_STATE")
+        self.cash = values["cash"]
+        self.position_quantity = values["position_quantity"]
+        self.average_cost = values["average_cost"]
+        self.realized_pnl = values["realized_pnl"]
 
     def snapshot(self, mark_price: float) -> PortfolioSnapshot:
         equity = self.cash + self.position_quantity * mark_price
