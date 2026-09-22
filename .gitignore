@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 .env
 data/*.jsonl
+data/*.sqlite3
