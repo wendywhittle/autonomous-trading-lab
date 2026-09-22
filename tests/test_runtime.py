@@ -105,3 +105,56 @@ def test_risk_sell_reduces_exposure():
     ).evaluate(decision, 100, 1, current_position_notional=150)
 
     assert result.approved
+
+
+def test_risk_blocks_daily_loss_and_drawdown():
+    from atlab.models import DecisionAction, JEVDecision, Side
+
+    decision = JEVDecision(
+        decision_id="risk-1",
+        strategy_id="momentum",
+        strategy_version="1.0.0",
+        symbol="TEST",
+        action=DecisionAction.ENTER,
+        side=Side.BUY,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state",
+    )
+    engine = DeterministicRiskEngine(
+        RiskLimits(max_daily_loss=50, max_drawdown=100)
+    )
+    daily = engine.evaluate(
+        decision, 100, 1, equity=940, session_start_equity=1000, high_water_mark=1000
+    )
+    assert not daily.approved
+    assert daily.reason == "DAILY_LOSS_LIMIT"
+
+    drawdown = engine.evaluate(
+        decision, 100, 1, equity=890, session_start_equity=1000, high_water_mark=1000
+    )
+    assert not drawdown.approved
+    assert drawdown.reason == "DRAWDOWN_LIMIT"
+
+
+def test_risk_limits_are_strict_boundaries():
+    from atlab.models import DecisionAction, JEVDecision, Side
+
+    decision = JEVDecision(
+        decision_id="risk-2",
+        strategy_id="momentum",
+        strategy_version="1.0.0",
+        symbol="TEST",
+        action=DecisionAction.ENTER,
+        side=Side.BUY,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state",
+    )
+    engine = DeterministicRiskEngine(
+        RiskLimits(max_daily_loss=50, max_drawdown=100, max_order_notional=200)
+    )
+    result = engine.evaluate(
+        decision, 100, 1, equity=950, session_start_equity=1000, high_water_mark=1000
+    )
+    assert result.approved
