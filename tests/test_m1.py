@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from atlab.adapters import InMemoryMarketData
 from atlab.backtest import run_backtest
@@ -76,3 +77,11 @@ def test_portfolio_state_round_trip(tmp_path):
     restored = PaperPortfolio(0)
     restored.load_state(path)
     assert restored.state() == portfolio.state()
+def test_registered_strategy_cannot_be_mutated_in_place():
+    registry = StrategyRegistry()
+    registered = registry.register(strategy())
+    with pytest.raises((ValidationError, TypeError)):
+        registered.version = "2.0.0"
+    assert registry.get("momentum", "1.0.0").version == "1.0.0"
+
+
