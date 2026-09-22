@@ -1,6 +1,7 @@
 from atlab.broker import (
     BrokerMode,
     BrokerOrderRequest,
+    BrokerOrderStatus,
     DisabledBroker,
     paper_request,
 )
@@ -21,7 +22,7 @@ def test_disabled_broker_never_accepts_orders():
 
     assert broker.mode is BrokerMode.DISABLED
     assert not result.accepted
-    assert result.status == "DISABLED"
+    assert result.status is BrokerOrderStatus.REJECTED
     assert result.message == "LIVE_BROKER_DISABLED"
     assert result.broker_order_id is None
 
@@ -33,7 +34,7 @@ def test_disabled_broker_cannot_cancel_or_reconcile_live_orders():
     results = broker.reconcile(["broker-order-1", "broker-order-2"])
 
     assert len(results) == 2
-    assert all(result.status == "DISABLED" for result in results)
+    assert all(result.status is BrokerOrderStatus.UNKNOWN for result in results)
     assert all(result.message == "LIVE_BROKER_DISABLED" for result in results)
 
 
