@@ -57,6 +57,28 @@ class ExecutionCoordinator:
             if str(exc) != "LEDGER_EVENT_ID_EXISTS":
                 raise
 
+    @staticmethod
+    def _attempt_from_intent(
+        idempotency_key: str,
+        status: BrokerOrderStatus,
+        result: BrokerOrderResult,
+    ) -> ExecutionAttempt:
+        intent_status = (
+            IntentStatus.TERMINAL
+            if status
+            in {
+                BrokerOrderStatus.FILLED,
+                BrokerOrderStatus.CANCELED,
+                BrokerOrderStatus.REJECTED,
+            }
+            else (
+                IntentStatus.UNKNOWN
+                if status is BrokerOrderStatus.UNKNOWN
+                else IntentStatus.SUBMITTED
+            )
+        )
+        return ExecutionAttempt(idempotency_key, intent_status, result)
+
     def prepare(self, request: BrokerOrderRequest) -> None:
         existing = self.store.get(request.idempotency_key)
         self.store.record(request)
@@ -75,6 +97,16 @@ class ExecutionCoordinator:
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
         self.prepare(request)
+        existing = self.store.get(request.idempotency_key)
+        if existing is None:
+            raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
+
+        if existing.result is not None:
+            return self._attempt_from_intent(
+                request.idempotency_key,
+                existing.status,
+                existing.result,
+            )
 
         try:
             result = self.broker.submit(request)
