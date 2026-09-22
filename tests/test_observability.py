@@ -1,5 +1,5 @@
 from atlab.ledger import ImmutableLedger
-from atlab.models import PaperOrder, OrderStatus, Side
+from atlab.models import OrderStatus, PaperOrder, Side
 from atlab.observability import inspect_ledger, reconcile_portfolio
 
 
