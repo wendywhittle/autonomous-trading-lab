@@ -98,14 +98,14 @@ def test_registered_strategy_parameters_cannot_mutate_registry_state():
 
 
 def test_ledger_rejects_duplicate_event_ids(tmp_path):
-    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
     ledger.append("TEST", "event-1", {"value": 1})
     with pytest.raises(ValueError, match="LEDGER_EVENT_ID_EXISTS"):
         ledger.append("TEST", "event-1", {"value": 2})
 
 
 def test_replay_rejects_duplicate_event_ids(tmp_path):
-    ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
     first = ledger.append("TEST", "event-1", {})
     duplicate = first.model_copy(update={"sequence": 1})
     with pytest.raises(ValueError, match="LEDGER_EVENT_ID_DUPLICATE"):
