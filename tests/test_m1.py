@@ -5,11 +5,11 @@ from pydantic import ValidationError
 
 from atlab.adapters import InMemoryMarketData
 from atlab.backtest import run_backtest
+from atlab.ledger import ImmutableLedger
 from atlab.models import MarketObservation, StrategyVersion
 from atlab.paper import PaperExecution
 from atlab.portfolio import PaperPortfolio
 from atlab.registry import StrategyRegistry
-from atlab.ledger import ImmutableLedger
 from atlab.replay import replay
 from atlab.state import build_state
 from atlab.strategy import make_decision
@@ -79,6 +79,8 @@ def test_portfolio_state_round_trip(tmp_path):
     restored = PaperPortfolio(0)
     restored.load_state(path)
     assert restored.state() == portfolio.state()
+
+
 def test_registered_strategy_cannot_be_mutated_in_place():
     registry = StrategyRegistry()
     registered = registry.register(strategy())
@@ -92,9 +94,6 @@ def test_registered_strategy_parameters_cannot_mutate_registry_state():
     registered = registry.register(strategy())
     registered.parameters["entry_return"] = 99
     assert registry.get("momentum", "1.0.0").parameters["entry_return"] == 0.001
-
-
-
 
 
 def test_ledger_rejects_duplicate_event_ids(tmp_path):
