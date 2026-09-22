@@ -68,6 +68,20 @@ def test_portfolio_accounting():
     assert snap.equity == 1000
 
 
+def test_portfolio_apply_is_idempotent():
+    state = build_state([obs(100, 1), obs(101, 2)])
+    order = PaperExecution().submit(make_decision(strategy(), state), 2, 101)
+    portfolio = PaperPortfolio(1000)
+
+    first = portfolio.apply(order)
+    second = portfolio.apply(order)
+
+    assert first == second
+    assert portfolio.cash == 798
+    assert portfolio.position_quantity == 2
+    assert portfolio.state()["applied_order_ids"] == [order.order_id]
+
+
 def test_portfolio_state_round_trip(tmp_path):
     portfolio = PaperPortfolio(1000)
     state = build_state([obs(100, 1), obs(101, 2)])
