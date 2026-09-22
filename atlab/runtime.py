@@ -69,6 +69,12 @@ class PaperTradingEngine:
         elif self.portfolio_state_path:
             self.portfolio.save_state(self.portfolio_state_path)
 
+    def _persist_state(self) -> None:
+        if self.portfolio_state_path:
+            self.portfolio.save_state(self.portfolio_state_path)
+        if self.risk_state_path and self.risk_session is not None:
+            self.risk_session.save(self.risk_state_path)
+
     def run(self, symbol: str) -> tuple[CycleResult, ...]:
         from .state import build_state
         from .strategy import make_decision
@@ -85,8 +91,14 @@ class PaperTradingEngine:
                 as_of=observations[index].timestamp,
             )
             decision = make_decision(self.strategy, state)
-            if self.ledger.contains_event_id(decision.decision_id):
+            decision_events = self.ledger.events_for_decision(decision.decision_id)
+            event_types = {event.event_type for event in decision_events}
+
+            if "ORDER" in event_types or "RISK_BLOCK" in event_types:
                 continue
+            if "KILL_SWITCH" in event_types:
+                raise RuntimeError("KILL_SWITCH_ACTIVE")
+
             price = state.price
             pre_trade_snapshot = self.portfolio.snapshot(price)
 
@@ -117,11 +129,24 @@ class PaperTradingEngine:
             )
             order = None
 
-            self.ledger.append(
-                "DECISION",
-                decision.decision_id,
-                decision.model_dump(mode="json"),
-            )
+            if "DECISION" not in event_types:
+                try:
+                    self.ledger.append(
+                        "DECISION",
+                        decision.decision_id,
+                        decision.model_dump(mode="json"),
+                    )
+                except ValueError as exc:
+                    if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                        raise
+                    decision_events = self.ledger.events_for_decision(
+                        decision.decision_id
+                    )
+                    event_types = {event.event_type for event in decision_events}
+                    if "ORDER" in event_types or "RISK_BLOCK" in event_types:
+                        continue
+                    if "KILL_SWITCH" in event_types:
+                        raise RuntimeError("KILL_SWITCH_ACTIVE")
 
             if risk_result.approved:
                 try:
@@ -134,30 +159,41 @@ class PaperTradingEngine:
                             {"decision_id": decision.decision_id, "reason": str(exc)},
                         )
                     raise
+
                 snapshot = self.portfolio.apply(order)
-                self.ledger.append(
-                    "ORDER",
-                    order.order_id,
-                    order.model_dump(mode="json"),
-                )
                 equity = snapshot.equity
+                self.risk_session = RiskSessionState(
+                    session_start_equity=self.risk_session.session_start_equity,
+                    high_water_mark=max(self.risk_session.high_water_mark, equity),
+                    current_equity=equity,
+                )
+                self._persist_state()
+
+                try:
+                    self.ledger.append(
+                        "ORDER",
+                        order.order_id,
+                        order.model_dump(mode="json"),
+                    )
+                except ValueError as exc:
+                    if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                        raise
             else:
                 equity = pre_trade_snapshot.equity
                 self.ledger.append(
                     "RISK_BLOCK",
                     f"risk-{decision.decision_id}",
-                    {"decision_id": decision.decision_id, "reason": risk_result.reason},
+                    {
+                        "decision_id": decision.decision_id,
+                        "reason": risk_result.reason,
+                    },
                 )
-
-            self.risk_session = RiskSessionState(
-                session_start_equity=self.risk_session.session_start_equity,
-                high_water_mark=max(self.risk_session.high_water_mark, equity),
-                current_equity=equity,
-            )
-            if self.portfolio_state_path:
-                self.portfolio.save_state(self.portfolio_state_path)
-            if self.risk_state_path:
-                self.risk_session.save(self.risk_state_path)
+                self.risk_session = RiskSessionState(
+                    session_start_equity=self.risk_session.session_start_equity,
+                    high_water_mark=max(self.risk_session.high_water_mark, equity),
+                    current_equity=equity,
+                )
+                self._persist_state()
 
             results.append(
                 CycleResult(
