@@ -85,7 +85,7 @@ class PaperPortfolio:
             raise ValueError("INVALID_PORTFOLIO_STATE")
         values = {
             key: float(data[key])
-            for key in {"cash", "position_quantity", "average_cost", "realized_pnl"}
+            for key in ("cash", "position_quantity", "average_cost", "realized_pnl")
         }
         order_ids = data["applied_order_ids"]
         if (
