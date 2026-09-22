@@ -1,59 +1,108 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
-from typing import ClassVar
 
 from .models import LedgerEvent
 
 
 class ImmutableLedger:
-    """Append-only JSONL ledger with process-local single-writer protection."""
-
-    _locks: ClassVar[dict[str, Lock]] = {}
+    """Append-only SQLite ledger with transactional multi-process sequencing."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        key = str(self.path.resolve())
-        self._lock = self._locks.setdefault(key, Lock())
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                sequence INTEGER PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                timestamp TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        return connection
+
+    def _row_to_event(self, row: tuple) -> LedgerEvent:
+        return LedgerEvent(
+            sequence=row[0],
+            event_type=row[1],
+            event_id=row[2],
+            timestamp=datetime.fromisoformat(row[3]),
+            payload=json.loads(row[4]),
+        )
+
+    def _initialize(self) -> None:
+        connection = self._connect()
+        connection.close()
 
     def append(self, event_type: str, event_id: str, payload: dict) -> LedgerEvent:
-        with self._lock:
-            existing = self._read_unlocked()
-            if existing and event_id in {event.event_id for event in existing}:
-                raise ValueError("LEDGER_EVENT_ID_EXISTS")
-            sequence = len(existing)
-            event = LedgerEvent(
-                sequence=sequence,
-                event_type=event_type,
-                event_id=event_id,
-                timestamp=datetime.now(UTC),
-                payload=payload,
+        event = LedgerEvent(
+            sequence=0,
+            event_type=event_type,
+            event_id=event_id,
+            timestamp=datetime.now(UTC),
+            payload=payload,
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence) + 1, 0) FROM events"
+            ).fetchone()[0]
+            event = event.model_copy(update={"sequence": sequence})
+            connection.execute(
+                """
+                INSERT INTO events(sequence, event_type, event_id, timestamp, payload)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event.sequence,
+                    event.event_type,
+                    event.event_id,
+                    event.timestamp.isoformat(),
+                    json.dumps(event.payload, sort_keys=True, separators=(",", ":")),
+                ),
             )
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(event.model_dump_json() + "\n")
-                handle.flush()
+            connection.execute("COMMIT")
             return event
-
-    def _read_unlocked(self) -> list[LedgerEvent]:
-        if not self.path.exists():
-            return []
-        return [
-            LedgerEvent.model_validate_json(line)
-            for line in self.path.read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-
-    def contains_event_id(self, event_id: str) -> bool:
-        with self._lock:
-            return any(event.event_id == event_id for event in self._read_unlocked())
+        except sqlite3.IntegrityError as exc:
+            connection.execute("ROLLBACK")
+            raise ValueError("LEDGER_EVENT_ID_EXISTS") from exc
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
 
     def contains_event_id(self, event_id: str) -> bool:
-        with self._lock:
-            return any(event.event_id == event_id for event in self._read_unlocked())
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (event_id,)
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
 
     def read(self) -> list[LedgerEvent]:
-        with self._lock:
-            return self._read_unlocked()
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT sequence, event_type, event_id, timestamp, payload
+                FROM events ORDER BY sequence
+                """
+            ).fetchall()
+            return [self._row_to_event(row) for row in rows]
+        finally:
+            connection.close()
