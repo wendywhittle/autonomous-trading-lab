@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Protocol, Iterable
+from collections.abc import Iterable
+from typing import Protocol
 
 from .models import MarketObservation
 
 
 class MarketDataAdapter(Protocol):
     """Provider-independent market data contract."""
+
     def observations(self, symbol: str) -> Iterable[MarketObservation]: ...
 
 
