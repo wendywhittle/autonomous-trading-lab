@@ -16,6 +16,8 @@ class PromotionEvidence:
     kill_switch_verified: bool
     replay_deterministic: bool
     no_live_credentials: bool
+    live_execution_implemented: bool = False
+    live_controls_verified: bool = False
     human_approval: bool = False
 
 
@@ -27,7 +29,7 @@ class PromotionResult:
 
 
 class PromotionGate:
-    """Explicit promotion gate. It never grants live authority automatically."""
+    """Explicit promotion gate; LIVE also requires a real, verified execution path."""
 
     REQUIREMENTS = (
         ("tests_green", "TESTS_NOT_GREEN"),
@@ -39,19 +41,29 @@ class PromotionGate:
         ("human_approval", "HUMAN_APPROVAL_REQUIRED"),
     )
 
+    LIVE_REQUIREMENTS = (
+        ("live_execution_implemented", "LIVE_EXECUTION_NOT_IMPLEMENTED"),
+        ("live_controls_verified", "LIVE_CONTROLS_NOT_VERIFIED"),
+    )
+
     def evaluate(
         self, evidence: PromotionEvidence, target: PromotionMode
     ) -> PromotionResult:
-        failed = tuple(
-            reason for field, reason in self.REQUIREMENTS if not getattr(evidence, field)
-        )
-        if target is PromotionMode.LIVE and not evidence.human_approval:
-            return PromotionResult(False, target, failed)
         if target is PromotionMode.PAPER:
-            paper_requirements = tuple(
+            failed = tuple(
                 reason
                 for field, reason in self.REQUIREMENTS[:-1]
                 if not getattr(evidence, field)
             )
-            return PromotionResult(not paper_requirements, target, paper_requirements)
+            return PromotionResult(not failed, target, failed)
+
+        failed = tuple(
+            reason for field, reason in self.REQUIREMENTS if not getattr(evidence, field)
+        )
+        if target is PromotionMode.LIVE:
+            failed += tuple(
+                reason
+                for field, reason in self.LIVE_REQUIREMENTS
+                if not getattr(evidence, field)
+            )
         return PromotionResult(not failed, target, failed)
