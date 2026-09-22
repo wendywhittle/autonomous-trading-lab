@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -60,7 +60,7 @@ class JEVDecision(BaseModel):
     confidence: float = Field(ge=0, le=1)
     rationale: str
     state_fingerprint: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class RiskDecision(BaseModel):
