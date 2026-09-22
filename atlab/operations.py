@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .ledger import ImmutableLedger
-from .observability import LedgerHealth, PortfolioReconciliation, inspect_ledger, reconcile_portfolio
+from .observability import (
+    LedgerHealth,
+    PortfolioReconciliation,
+    inspect_ledger,
+    reconcile_portfolio,
+)
 
 
 @dataclass(frozen=True)
