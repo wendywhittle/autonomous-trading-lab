@@ -10,7 +10,7 @@ Intelligence may propose decisions, typed evaluation may assess them, determinis
 
 ## M0 boundary
 
-M0 provides deterministic state construction, immutable strategy-version handling, hard risk limits, a kill switch with audit events, simulated paper fills, persistent paper portfolio and risk-session state, restart-safe decision/order idempotency, transactional SQLite event recording, replay validation, and explicit promotion gates.
+M0 provides deterministic state construction, immutable strategy-version handling, hard risk limits, a kill switch with audit events, simulated paper fills, persistent paper portfolio and risk-session state, restart-safe decision/order idempotency, transactional SQLite event recording, replay validation, reproducible data snapshots and experiment identity, concurrency stress coverage, and explicit promotion gates.
 
 **Live brokerage execution is not implemented or enabled in M0.** No API keys or broker credentials belong in source control. The promotion gate refuses LIVE eligibility until a real live execution path and its controls are implemented and independently verified.
 
@@ -28,24 +28,23 @@ M0 provides deterministic state construction, immutable strategy-version handlin
 - Duplicate paper order application is idempotent.
 - Kill-switch activation is recorded in the ledger.
 - Replay validates contiguous event sequencing and unique event IDs.
+- Data snapshots are content-addressed so identical observations produce identical snapshot identity.
+- Experiment identity binds a strategy version and parameters to an exact data snapshot.
+- Concurrent ledger appends are covered by stress tests.
 - Promotion cannot manufacture live execution capability; LIVE requires explicit human approval plus verified live execution controls.
 
 ## Development
 
-```bash
 python -m pip install -e ".[dev]"
 pytest
 ruff check .
-```
 
 ## Next layers
 
-1. Add explicit experiment records and reproducible data snapshots.
-2. Add concurrency/recovery stress tests around the transactional ledger.
-3. Add observability, reconciliation, and operational failure handling.
-4. Add provider-independent broker interfaces, initially disabled.
-5. Add compliance/governance policy boundaries, audit requirements, and controlled promotion evidence.
-6. Build the live execution boundary only after controls, permissions, reconciliation, and independent verification exist.
+1. Add observability, reconciliation, and operational failure handling.
+2. Add provider-independent broker interfaces, initially disabled.
+3. Add compliance/governance policy boundaries, audit requirements, and controlled promotion evidence.
+4. Build the live execution boundary only after controls, permissions, reconciliation, and independent verification exist.
 
 ## Design principle
 
