@@ -63,3 +63,16 @@ def test_portfolio_accounting():
     assert snap.cash == 798
     assert snap.position_quantity == 2
     assert snap.equity == 1000
+
+
+def test_portfolio_state_round_trip(tmp_path):
+    portfolio = PaperPortfolio(1000)
+    state = build_state([obs(100, 1), obs(101, 2)])
+    order = PaperExecution().submit(make_decision(strategy(), state), 2, 101)
+    portfolio.apply(order)
+    path = tmp_path / "portfolio.json"
+    portfolio.save_state(path)
+
+    restored = PaperPortfolio(0)
+    restored.load_state(path)
+    assert restored.state() == portfolio.state()
