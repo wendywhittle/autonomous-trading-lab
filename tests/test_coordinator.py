@@ -35,7 +35,11 @@ class FailingBroker:
 class AcceptedBroker:
     mode = BrokerMode.LIVE
 
+    def __init__(self):
+        self.submissions = 0
+
     def submit(self, request):
+        self.submissions += 1
         return BrokerOrderResult(
             accepted=True,
             broker_order_id="broker-1",
@@ -103,12 +107,14 @@ def test_coordinator_marks_provider_failure_unknown_and_audits(tmp_path):
 
 
 def test_coordinator_audits_accepted_submission(tmp_path):
-    coordinator_instance, store, ledger = coordinator(tmp_path, AcceptedBroker())
+    broker = AcceptedBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
 
     attempt = coordinator_instance.submit(req())
 
     assert attempt.status is IntentStatus.SUBMITTED
     assert attempt.result.status is BrokerOrderStatus.ACCEPTED
+    assert broker.submissions == 1
     intent = store.get("intent-1")
     assert intent.status is BrokerOrderStatus.ACCEPTED
     assert intent.result == attempt.result
@@ -118,6 +124,39 @@ def test_coordinator_audits_accepted_submission(tmp_path):
         "EXECUTION_RESULT",
     ]
     assert events[1].payload["broker_order_id"] == "broker-1"
+
+
+def test_coordinator_does_not_resubmit_existing_external_result(tmp_path):
+    broker = AcceptedBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+
+    first = coordinator_instance.submit(req())
+    second = coordinator_instance.submit(req())
+
+    assert first.result == second.result
+    assert first.status is IntentStatus.SUBMITTED
+    assert second.status is IntentStatus.SUBMITTED
+    assert broker.submissions == 1
+    assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_RESULT",
+    ]
+
+
+def test_coordinator_does_not_resubmit_unknown_result(tmp_path):
+    broker = FailingBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+
+    first = coordinator_instance.submit(req())
+    second = coordinator_instance.submit(req())
+
+    assert first.result == second.result
+    assert first.status is IntentStatus.UNKNOWN
+    assert second.status is IntentStatus.UNKNOWN
+    assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_UNKNOWN",
+    ]
 
 
 def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
