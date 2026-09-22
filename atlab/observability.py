@@ -26,7 +26,7 @@ def inspect_ledger(ledger: ImmutableLedger) -> LedgerHealth:
     errors: list[str] = []
     try:
         events = ledger.read()
-    except Exception as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         return LedgerHealth(
             healthy=False,
             event_count=0,
