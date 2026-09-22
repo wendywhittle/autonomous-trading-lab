@@ -85,3 +85,10 @@ def test_registered_strategy_cannot_be_mutated_in_place():
     assert registry.get("momentum", "1.0.0").version == "1.0.0"
 
 
+def test_registered_strategy_parameters_cannot_mutate_registry_state():
+    registry = StrategyRegistry()
+    registered = registry.register(strategy())
+    registered.parameters["entry_return"] = 99
+    assert registry.get("momentum", "1.0.0").parameters["entry_return"] == 0.001
+
+
