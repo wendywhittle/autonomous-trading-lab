@@ -43,7 +43,8 @@ def test_paper_engine_runs_end_to_end(tmp_path):
 
     assert len(results) == 2
     assert all(item.order is not None for item in results)
-    assert results[-1].equity == 1000
+    assert results[-1].equity == 1002
+    assert results[-1].order.fill_price == 102
     assert [event.event_type for event in engine.ledger.read()] == [
         "DECISION",
         "ORDER",
