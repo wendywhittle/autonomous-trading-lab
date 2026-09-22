@@ -2,7 +2,6 @@ from atlab.broker import (
     BrokerMode,
     BrokerOrderRequest,
     BrokerOrderStatus,
-    BrokerAdapter,
     DisabledBroker,
     IdempotentBroker,
     paper_request,
