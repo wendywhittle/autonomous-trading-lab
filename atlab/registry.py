@@ -4,15 +4,18 @@ from .models import StrategyVersion
 
 
 class StrategyRegistry:
-    """Registry that rejects mutation of an existing strategy version."""
+    """In-memory registry of immutable strategy-version definitions."""
+
     def __init__(self):
         self._versions: dict[tuple[str, str], StrategyVersion] = {}
 
     def register(self, strategy: StrategyVersion) -> StrategyVersion:
         key = (strategy.strategy_id, strategy.version)
         existing = self._versions.get(key)
-        if existing is not None and existing != strategy:
-            raise ValueError("STRATEGY_VERSION_IMMUTABLE")
+        if existing is not None:
+            if existing != strategy:
+                raise ValueError("STRATEGY_VERSION_IMMUTABLE")
+            return existing
         self._versions[key] = strategy
         return strategy
 
