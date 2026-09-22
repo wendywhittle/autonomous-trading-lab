@@ -10,18 +10,21 @@ Intelligence may propose decisions, typed evaluation may assess them, determinis
 
 ## M0 boundary
 
-M0 provides deterministic state construction, versioned decisions, hard risk limits, a kill switch, simulated paper fills, append-only event recording, and replay validation.
+M0 provides deterministic state construction, versioned decisions, hard risk limits, a kill switch, simulated paper fills, append-only event recording, replay validation, persistent paper portfolio state, persisted risk-session state, and explicit promotion gates.
 
-**Live brokerage execution is not implemented or enabled in M0.** No API keys or broker credentials belong in source control. A future live adapter must be an explicit promotion step behind independent tests and risk gates.
+**Live brokerage execution is not implemented or enabled in M0.** No API keys or broker credentials belong in source control. The promotion gate also refuses LIVE eligibility until a real live execution path and its controls are implemented and independently verified.
 
 ## Safety properties
 
 - No future data may enter a state built at a historical cutoff.
-- Strategy decisions carry an explicit immutable strategy version.
+- Strategy decisions carry an explicit version.
 - Risk is a deterministic gate, not an LLM judgment.
+- Daily-loss and drawdown checks are deterministic and use persisted session state when configured.
 - Paper execution is simulation only.
+- Portfolio state is atomically persisted when a state path is configured, so a process restart does not reset the paper account.
 - The ledger is append-only at the application interface and currently uses a process-local writer lock; durable multi-process transactional storage is a later hardening step.
 - Replay validates contiguous event sequencing.
+- Promotion cannot manufacture live execution capability; LIVE requires explicit human approval plus verified live execution controls.
 
 ## Development
 
@@ -33,9 +36,9 @@ ruff check .
 
 ## Next layers
 
-1. Provider-independent market-data adapters and normalization.
-2. Strategy registry with immutable versions and experiment records.
-3. Backtest/replay runner with explicit data snapshots.
-4. Portfolio/P&L accounting and daily-loss controls.
-5. Promotion gates and observability.
-6. Broker adapter interface, initially disabled, followed by controlled paper-to-live promotion after evidence and review.
+1. Harden immutable strategy objects and registry storage.
+2. Add explicit experiment records and reproducible data snapshots.
+3. Strengthen ledger durability for multi-process operation.
+4. Add observability, failure recovery, and kill-switch audit events.
+5. Define a provider-independent broker interface, initially disabled.
+6. Build controlled paper-to-live promotion evidence only after the execution path, controls, and independent verification exist.
