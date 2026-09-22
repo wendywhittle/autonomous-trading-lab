@@ -46,6 +46,10 @@ class ImmutableLedger:
             if line
         ]
 
+    def contains_event_id(self, event_id: str) -> bool:
+        with self._lock:
+            return any(event.event_id == event_id for event in self._read_unlocked())
+
     def read(self) -> list[LedgerEvent]:
         with self._lock:
             return self._read_unlocked()
