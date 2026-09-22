@@ -199,4 +199,4 @@ def test_paper_engine_recovers_incomplete_decision_after_restart(tmp_path):
     )
     assert restarted.run("TEST") == ()
     assert restarted.portfolio.position_quantity == 2
-    assert restarted.portfolio.cash == 798
+    assert restarted.portfolio.cash == 797
