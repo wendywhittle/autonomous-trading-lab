@@ -21,7 +21,10 @@ class ImmutableLedger:
 
     def append(self, event_type: str, event_id: str, payload: dict) -> LedgerEvent:
         with self._lock:
-            sequence = self._next_sequence()
+            existing = self._read_unlocked()
+            if existing and event_id in {event.event_id for event in existing}:
+                raise ValueError("LEDGER_EVENT_ID_EXISTS")
+            sequence = len(existing)
             event = LedgerEvent(
                 sequence=sequence,
                 event_type=event_type,
@@ -31,15 +34,10 @@ class ImmutableLedger:
             )
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(event.model_dump_json() + "\n")
+                handle.flush()
             return event
 
-    def _next_sequence(self) -> int:
-        if not self.path.exists():
-            return 0
-        with self.path.open("rb") as handle:
-            return sum(1 for _ in handle)
-
-    def read(self) -> list[LedgerEvent]:
+    def _read_unlocked(self) -> list[LedgerEvent]:
         if not self.path.exists():
             return []
         return [
@@ -47,3 +45,7 @@ class ImmutableLedger:
             for line in self.path.read_text(encoding="utf-8").splitlines()
             if line
         ]
+
+    def read(self) -> list[LedgerEvent]:
+        with self._lock:
+            return self._read_unlocked()
