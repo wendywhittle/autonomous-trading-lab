@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .broker import BrokerOrderRequest, BrokerOrderResult, BrokerOrderStatus
-from .models import Side
+from .models import RiskDecision, Side
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,8 @@ class ExecutionIntent:
     authorization_fingerprint: str | None = None
     authorization_issued_at: str | None = None
     authorization_expires_at: str | None = None
+    risk_decision: RiskDecision | None = None
+    risk_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         binding = (
@@ -65,7 +67,9 @@ class ExecutionIntentStore:
                 authorization_id TEXT,
                 authorization_fingerprint TEXT,
                 authorization_issued_at TEXT,
-                authorization_expires_at TEXT
+                authorization_expires_at TEXT,
+                risk_decision TEXT,
+                risk_fingerprint TEXT
             )
             """
         )
@@ -78,6 +82,8 @@ class ExecutionIntentStore:
             "authorization_fingerprint",
             "authorization_issued_at",
             "authorization_expires_at",
+            "risk_decision",
+            "risk_fingerprint",
         ):
             if column not in columns:
                 connection.execute(
@@ -239,6 +245,8 @@ class ExecutionIntentStore:
                 "side": request.side.value,
                 "quantity": request.quantity,
                 "price": request.price,
+                "reference_price": request.reference_price,
+                "decision_id": request.decision_id,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -253,6 +261,8 @@ class ExecutionIntentStore:
             side=Side(encoded["side"]),
             quantity=float(encoded["quantity"]),
             price=float(encoded["price"]) if encoded["price"] is not None else None,
+            reference_price=(float(encoded["reference_price"]) if encoded.get("reference_price") is not None else None),
+            decision_id=encoded.get("decision_id"),
         )
 
     @staticmethod
@@ -308,6 +318,8 @@ class ExecutionIntentStore:
             authorization_fingerprint=row[5],
             authorization_issued_at=row[6],
             authorization_expires_at=row[7],
+            risk_decision=RiskDecision.model_validate(json.loads(row[8])) if row[8] else None,
+            risk_fingerprint=row[9],
         )
 
     def _get_in_connection(
@@ -329,6 +341,7 @@ class ExecutionIntentStore:
         connection: sqlite3.Connection,
         request: BrokerOrderRequest,
         authorization_binding: tuple[str, str, str, str] | None = None,
+        risk_decision: RiskDecision | None = None,
     ) -> tuple[ExecutionIntent, bool]:
         existing = self._get_in_connection(connection, request.idempotency_key)
         encoded_request = self._encode_request(request)
@@ -344,6 +357,8 @@ class ExecutionIntentStore:
             )
             if actual_binding != expected_binding:
                 raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
+            if existing.risk_fingerprint != (risk_decision.risk_fingerprint if risk_decision else None):
+                raise ValueError("EXECUTION_INTENT_RISK_CONFLICT")
             return existing, False
 
         connection.execute(
@@ -351,15 +366,18 @@ class ExecutionIntentStore:
             INSERT INTO execution_intents(
                 idempotency_key, request, status, result,
                 authorization_id, authorization_fingerprint,
-                authorization_issued_at, authorization_expires_at
+                authorization_issued_at, authorization_expires_at,
+                risk_decision, risk_fingerprint
             )
-            VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request.idempotency_key,
                 encoded_request,
                 BrokerOrderStatus.UNKNOWN.value,
                 *expected_binding,
+                risk_decision.model_dump_json() if risk_decision else None,
+                risk_decision.risk_fingerprint if risk_decision else None,
             ),
         )
         created = self._get_in_connection(connection, request.idempotency_key)
