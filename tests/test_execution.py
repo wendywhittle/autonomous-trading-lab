@@ -1,4 +1,4 @@
-from atlab.broker import BrokerOrderRequest
+from atlab.broker import BrokerOrderRequest, BrokerOrderResult, BrokerOrderStatus
 from atlab.execution import ExecutionIntentStore
 from atlab.models import Side
 
@@ -52,3 +52,30 @@ def test_execution_intent_does_not_claim_external_acceptance(tmp_path):
 
     assert intent.idempotency_key == "intent-1"
     assert store.get("intent-1").request == request()
+
+
+def test_execution_rejects_broker_order_id_rebinding(tmp_path):
+    store = ExecutionIntentStore(tmp_path / "intents.sqlite3")
+    store.record(request())
+    store.update_result(
+        "intent-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="EXECUTION_BROKER_ORDER_ID_CONFLICT"):
+        store.update_result(
+            "intent-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-evil",
+                status=BrokerOrderStatus.ACCEPTED,
+                message="ACCEPTED",
+            ),
+        )
+
+    assert store.get("intent-1").result.broker_order_id == "broker-1"
