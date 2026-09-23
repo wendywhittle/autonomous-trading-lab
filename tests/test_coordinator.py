@@ -253,8 +253,7 @@ def test_live_broker_requires_explicit_execution_authorization(tmp_path):
 def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance = coordinator(tmp_path, broker, authorization=live_authorization())[0]
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-test")
 
     attempt = coordinator_instance.submit(req())
@@ -271,8 +270,7 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
 def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance = ExecutionCoordinator(store, broker, ledger, authorization=live_authorization())
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-race-test")
 
     original_prepare = coordinator_instance.prepare
@@ -735,8 +733,7 @@ def test_coordinator_refuses_submission_when_reconciliation_is_unhealthy(tmp_pat
 def test_live_authorization_activation_rolls_back_if_audit_fails(tmp_path, monkeypatch):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance = ExecutionCoordinator(store, broker, ledger, authorization=live_authorization())
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
 
     def fail_audit(*args, **kwargs):
         raise RuntimeError("AUTHORIZATION_AUDIT_FAILED")
@@ -753,8 +750,7 @@ def test_live_authorization_activation_rolls_back_if_audit_fails(tmp_path, monke
 def test_live_authorization_revocation_rolls_back_if_audit_fails(tmp_path, monkeypatch):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-activate")
     authorization_id = coordinator_instance.authorization.authorization_id
     assert store.authorization_is_active(authorization_id)
@@ -773,8 +769,7 @@ def test_live_authorization_revocation_rolls_back_if_audit_fails(tmp_path, monke
 def test_live_broker_rejects_revoked_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-activate-1")
     coordinator_instance.submit(req())
     coordinator_instance.revoke_execution_authorization("operator-revoke-1")
@@ -798,8 +793,7 @@ def test_live_broker_rejects_revoked_authorization(tmp_path):
 def test_new_live_authorization_replaces_previous_active_session(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    first, store, _ = coordinator(tmp_path, broker)
-    first = ExecutionCoordinator(store, broker, ledger, authorization=live_authorization())
+    first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     first.activate_execution_authorization("operator-first")
     first.submit(req())
     first_id = first.authorization.authorization_id
@@ -817,13 +811,11 @@ def test_new_live_authorization_replaces_previous_active_session(tmp_path):
 def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    first, store, ledger = coordinator(tmp_path, broker)
-    first.authorization = live_authorization()
+    first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     first.submit(req())
     first.revoke_execution_authorization("operator-revoke")
 
-    second, _, _ = coordinator(tmp_path, broker)
-    second.authorization = first.authorization
+    second, _, _ = coordinator(tmp_path, broker, authorization=first.authorization)
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
         second.submit(
             BrokerOrderRequest(
@@ -950,8 +942,7 @@ def test_compliance_blocks_order_notional_limit(tmp_path):
 def test_live_execution_intent_binds_exact_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, _ = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     authorization = coordinator_instance.authorization
 
     coordinator_instance.submit(req())
@@ -966,8 +957,7 @@ def test_live_execution_intent_binds_exact_authorization(tmp_path):
 def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, _ = coordinator(tmp_path, broker)
-    coordinator_instance = ExecutionCoordinator(store, broker, ledger, authorization=live_authorization())
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.prepare(req())
     first = store.get("intent-1")
 
@@ -982,8 +972,7 @@ def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tm
 def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, _ = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.prepare(req())
 
     connection = store._connect()
@@ -1020,8 +1009,7 @@ def test_paper_execution_intent_has_no_live_authorization_binding(tmp_path):
 def test_live_execution_requires_explicit_authorization_activation(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
 
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_NOT_ACTIVATED"):
         coordinator_instance.submit(
@@ -1042,8 +1030,7 @@ def test_live_execution_requires_explicit_authorization_activation(tmp_path):
 def test_live_execution_requires_activation_even_when_authorization_state_table_exists(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.authorization = live_authorization()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
 
     connection = store._connect()
     try:
