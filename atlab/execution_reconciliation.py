@@ -134,3 +134,24 @@ def inspect_execution_consistency(
 def execution_requires_halt(consistency: ExecutionConsistency) -> bool:
     """Return whether autonomous execution must remain blocked."""
     return not consistency.healthy
+
+
+def reconciliation_halt_reason(consistency: ExecutionConsistency) -> str:
+    """Build a stable, explicit reason for a durable execution halt."""
+    if consistency.healthy:
+        raise ValueError("EXECUTION_HALT_NOT_REQUIRED")
+    return "RECONCILIATION_FAILURE:" + "|".join(consistency.errors)
+
+
+def assert_execution_halt(
+    store: ExecutionIntentStore,
+    consistency: ExecutionConsistency,
+) -> bool:
+    """Durably assert a halt for an unhealthy reconciliation result.
+
+    This operation is monotonic: healthy inspection never clears a halt.
+    """
+    if consistency.healthy:
+        return False
+    store.halt(reconciliation_halt_reason(consistency))
+    return True
