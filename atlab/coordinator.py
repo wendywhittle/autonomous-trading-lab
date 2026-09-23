@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from enum import Enum
 
@@ -28,7 +29,7 @@ class ExecutionAttempt:
 
 
 class ExecutionCoordinator:
-    """Coordinates durable intent state, provider calls, and audit events."""
+    """Coordinates durable intent state, provider calls, and atomic audit events."""
 
     def __init__(
         self,
@@ -42,22 +43,84 @@ class ExecutionCoordinator:
         self.broker = broker
         self.ledger = ledger
 
+    def _transaction(self) -> sqlite3.Connection:
+        connection = self.store._connect()
+        connection.execute("BEGIN IMMEDIATE")
+        return connection
+
     @staticmethod
     def _event_id(event_type: str, idempotency_key: str) -> str:
         return f"{event_type.lower()}-{idempotency_key}"
 
-    def _audit(
-        self,
-        event_type: str,
-        idempotency_key: str,
-        payload: dict,
-    ) -> None:
-        event_id = self._event_id(event_type, idempotency_key)
+    def _commit_intent_creation(self, request: BrokerOrderRequest) -> None:
+        connection = self._transaction()
         try:
-            self.ledger.append(event_type, event_id, payload)
+            _, created = self.store._record_in_connection(connection, request)
+            if created:
+                self.ledger._append_in_connection(
+                    connection,
+                    "EXECUTION_INTENT_CREATED",
+                    self._event_id(
+                        "EXECUTION_INTENT_CREATED", request.idempotency_key
+                    ),
+                    {
+                        "idempotency_key": request.idempotency_key,
+                        "symbol": request.symbol,
+                        "side": request.side.value,
+                        "quantity": request.quantity,
+                        "price": request.price,
+                    },
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
+
+    def _commit_result(
+        self,
+        idempotency_key: str,
+        result: BrokerOrderResult,
+        event_type: str,
+    ) -> None:
+        connection = self._transaction()
+        try:
+            self.store._update_result_in_connection(connection, idempotency_key, result)
+            self.ledger._append_in_connection(
+                connection,
+                event_type,
+                self._event_id(event_type, idempotency_key),
+                {
+                    "idempotency_key": idempotency_key,
+                    "broker_order_id": result.broker_order_id,
+                    "status": result.status.value,
+                    "accepted": result.accepted,
+                    "message": result.message,
+                },
+            )
+            connection.execute("COMMIT")
         except ValueError as exc:
-            if str(exc) != "LEDGER_EVENT_ID_EXISTS":
-                raise
+            if str(exc) == "LEDGER_EVENT_ID_EXISTS":
+                connection.execute("ROLLBACK")
+                connection.close()
+                return
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
 
     @staticmethod
     def _attempt_from_intent(
@@ -82,20 +145,7 @@ class ExecutionCoordinator:
         return ExecutionAttempt(idempotency_key, intent_status, result)
 
     def prepare(self, request: BrokerOrderRequest) -> None:
-        existing = self.store.get(request.idempotency_key)
-        self.store.record(request)
-        if existing is None:
-            self._audit(
-                "EXECUTION_INTENT_CREATED",
-                request.idempotency_key,
-                {
-                    "idempotency_key": request.idempotency_key,
-                    "symbol": request.symbol,
-                    "side": request.side.value,
-                    "quantity": request.quantity,
-                    "price": request.price,
-                },
-            )
+        self._commit_intent_creation(request)
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
         self.prepare(request)
@@ -119,15 +169,8 @@ class ExecutionCoordinator:
                 status=BrokerOrderStatus.UNKNOWN,
                 message="BROKER_SUBMISSION_UNKNOWN",
             )
-            self.store.update_result(request.idempotency_key, result)
-            self._audit(
-                "EXECUTION_UNKNOWN",
-                request.idempotency_key,
-                {
-                    "idempotency_key": request.idempotency_key,
-                    "status": result.status.value,
-                    "message": result.message,
-                },
+            self._commit_result(
+                request.idempotency_key, result, "EXECUTION_UNKNOWN"
             )
             return ExecutionAttempt(
                 request.idempotency_key,
@@ -135,7 +178,7 @@ class ExecutionCoordinator:
                 result,
             )
 
-        self.store.update_result(request.idempotency_key, result)
+        self._commit_result(request.idempotency_key, result, "EXECUTION_RESULT")
         status = (
             IntentStatus.TERMINAL
             if result.status
@@ -145,17 +188,6 @@ class ExecutionCoordinator:
                 BrokerOrderStatus.REJECTED,
             }
             else IntentStatus.SUBMITTED
-        )
-        self._audit(
-            "EXECUTION_RESULT",
-            request.idempotency_key,
-            {
-                "idempotency_key": request.idempotency_key,
-                "broker_order_id": result.broker_order_id,
-                "status": result.status.value,
-                "accepted": result.accepted,
-                "message": result.message,
-            },
         )
         return ExecutionAttempt(request.idempotency_key, status, result)
 
@@ -175,17 +207,8 @@ class ExecutionCoordinator:
                     continue
                 if intent.result.broker_order_id != result.broker_order_id:
                     continue
-                self.store.update_result(key, result)
-                self._audit(
-                    "EXECUTION_RECONCILED",
-                    key,
-                    {
-                        "idempotency_key": key,
-                        "broker_order_id": result.broker_order_id,
-                        "status": result.status.value,
-                        "accepted": result.accepted,
-                        "message": result.message,
-                    },
+                self._commit_result(
+                    key, result, "EXECUTION_RECONCILED"
                 )
                 reconciliations.append(
                     ExecutionReconciliation(key, result)
