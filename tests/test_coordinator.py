@@ -273,6 +273,115 @@ def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
     ]
 
 
+def test_reconcile_unrequested_provider_order_durably_halts(tmp_path):
+    class UnexpectedBroker(AcceptedBroker):
+        def reconcile(self, broker_order_ids):
+            return (
+                BrokerOrderResult(
+                    accepted=True,
+                    broker_order_id="provider-unrequested",
+                    status=BrokerOrderStatus.FILLED,
+                    message="UNREQUESTED",
+                ),
+            )
+
+    coordinator_instance, store, ledger = coordinator(tmp_path, UnexpectedBroker())
+    coordinator_instance.prepare(req())
+    store.update_result(
+        "intent-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="EXECUTION_RECONCILE_UNREQUESTED_ORDER"
+    ):
+        coordinator_instance.reconcile(["broker-1"])
+
+    assert store.is_halted()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_RECONCILE_UNREQUESTED_ORDER:provider-unrequested"
+        in event.payload["reason"]
+        for event in ledger.read()
+    )
+
+
+def test_reconcile_duplicate_provider_result_durably_halts(tmp_path):
+    class DuplicateBroker(AcceptedBroker):
+        def reconcile(self, broker_order_ids):
+            result = self.get_order("broker-1")
+            return (result, result)
+
+    coordinator_instance, store, ledger = coordinator(tmp_path, DuplicateBroker())
+    coordinator_instance.submit(req())
+
+    with pytest.raises(
+        RuntimeError, match="EXECUTION_RECONCILE_DUPLICATE_RESULT"
+    ):
+        coordinator_instance.reconcile(["broker-1"])
+
+    assert store.is_halted()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_RECONCILE_DUPLICATE_RESULT:broker-1"
+        in event.payload["reason"]
+        for event in ledger.read()
+    )
+
+
+def test_reconcile_duplicate_requested_order_id_durably_halts(tmp_path):
+    coordinator_instance, store, ledger = coordinator(tmp_path, AcceptedBroker())
+
+    with pytest.raises(
+        RuntimeError, match="EXECUTION_RECONCILE_DUPLICATE_REQUESTED_ORDER_ID"
+    ):
+        coordinator_instance.reconcile(["broker-1", "broker-1"])
+
+    assert store.is_halted()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_RECONCILE_DUPLICATE_REQUESTED_ORDER_ID"
+        in event.payload["reason"]
+        for event in ledger.read()
+    )
+
+
+def test_reconcile_unbound_requested_provider_order_durably_halts(tmp_path):
+    class UnknownBindingBroker(AcceptedBroker):
+        def reconcile(self, broker_order_ids):
+            return (
+                BrokerOrderResult(
+                    accepted=True,
+                    broker_order_id="broker-unbound",
+                    status=BrokerOrderStatus.FILLED,
+                    message="UNBOUND",
+                ),
+            )
+
+    coordinator_instance, store, ledger = coordinator(tmp_path, UnknownBindingBroker())
+    coordinator_instance.prepare(req())
+    store.update_result(
+        "intent-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="EXECUTION_RECONCILE_UNREQUESTED_ORDER"):
+        coordinator_instance.reconcile(["broker-unbound"])
+
+    assert store.is_halted()
+    assert any(event.event_type == "EXECUTION_HALT_ASSERTED" for event in ledger.read())
+
+
 def test_coordinator_does_not_duplicate_intent_audit_on_retry(tmp_path):
     coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
 
