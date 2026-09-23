@@ -52,12 +52,16 @@ class ExecutionCoordinator:
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
         self.store = store
-        self.broker = broker
+        self._broker = broker
         self.ledger = ledger
         self.authorization = authorization
         self._compliance = compliance or ComplianceEngine(
             CompliancePolicy(policy_id="default", version="1")
         )
+
+    @property
+    def broker(self) -> BrokerAdapter:
+        return self._broker
 
     @property
     def compliance(self) -> ComplianceEngine:
