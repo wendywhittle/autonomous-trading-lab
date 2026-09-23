@@ -42,8 +42,10 @@ class BrokerOrderRequest:
             raise ValueError("INVALID_QUANTITY")
         if self.price is not None and self.price <= 0:
             raise ValueError("INVALID_PRICE")
-        if self.reference_price is not None and self.reference_price <= 0:
-            raise ValueError("INVALID_REFERENCE_PRICE")
+        if self.reference_price is not None:
+            import math
+            if not math.isfinite(self.reference_price) or self.reference_price <= 0:
+                raise ValueError("INVALID_REFERENCE_PRICE")
         if self.decision_id is None:
             object.__setattr__(self, "decision_id", self.idempotency_key)
 
