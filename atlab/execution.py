@@ -144,6 +144,8 @@ class ExecutionIntentStore:
                 "broker_order_id": result.broker_order_id,
                 "status": result.status.value,
                 "message": result.message,
+                "filled_quantity": result.filled_quantity,
+                "remaining_quantity": result.remaining_quantity,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -159,6 +161,16 @@ class ExecutionIntentStore:
             broker_order_id=encoded["broker_order_id"],
             status=BrokerOrderStatus(encoded["status"]),
             message=str(encoded["message"]),
+            filled_quantity=(
+                float(encoded["filled_quantity"])
+                if encoded.get("filled_quantity") is not None
+                else None
+            ),
+            remaining_quantity=(
+                float(encoded["remaining_quantity"])
+                if encoded.get("remaining_quantity") is not None
+                else None
+            ),
         )
 
     def _initialize(self) -> None:
@@ -213,6 +225,45 @@ class ExecutionIntentStore:
             raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
         return created, True
 
+    @staticmethod
+    def _validate_result_for_request(
+        request: BrokerOrderRequest,
+        existing: ExecutionIntent,
+        result: BrokerOrderResult,
+    ) -> None:
+        if result.filled_quantity is None and result.remaining_quantity is None:
+            if result.status is BrokerOrderStatus.PARTIALLY_FILLED:
+                raise ValueError("PARTIAL_FILL_QUANTITY_REQUIRED")
+            return
+
+        filled = result.filled_quantity
+        remaining = result.remaining_quantity
+        if filled is None or remaining is None:
+            raise ValueError("EXECUTION_FILL_QUANTITY_PAIR_REQUIRED")
+        if abs((filled + remaining) - request.quantity) > 1e-9:
+            raise ValueError("EXECUTION_FILL_QUANTITY_TOTAL_MISMATCH")
+
+        previous_filled = (
+            existing.result.filled_quantity
+            if existing.result is not None and existing.result.filled_quantity is not None
+            else 0.0
+        )
+        if filled < previous_filled - 1e-9:
+            raise ValueError("EXECUTION_FILL_QUANTITY_REGRESSION")
+
+        if result.status is BrokerOrderStatus.PARTIALLY_FILLED:
+            if not (0 < filled < request.quantity):
+                raise ValueError("INVALID_PARTIAL_FILL_QUANTITY")
+        elif result.status is BrokerOrderStatus.FILLED:
+            if abs(filled - request.quantity) > 1e-9 or remaining != 0:
+                raise ValueError("INVALID_FILLED_QUANTITY")
+        elif result.status in {
+            BrokerOrderStatus.CANCELED,
+            BrokerOrderStatus.REJECTED,
+        }:
+            if filled > request.quantity or remaining < 0:
+                raise ValueError("INVALID_TERMINAL_FILL_QUANTITY")
+
     def _update_result_in_connection(
         self,
         connection: sqlite3.Connection,
@@ -222,6 +273,8 @@ class ExecutionIntentStore:
         existing = self._get_in_connection(connection, idempotency_key)
         if existing is None:
             raise KeyError("EXECUTION_INTENT_NOT_FOUND")
+
+        self._validate_result_for_request(existing.request, existing, result)
 
         if existing.result is not None and existing.result != result:
             terminal = {
