@@ -14,7 +14,10 @@ from atlab.coordinator import ExecutionCoordinator, IntentStatus
 from atlab.compliance import ComplianceEngine, CompliancePolicy
 from atlab.execution import ExecutionIntentStore
 from atlab.ledger import ImmutableLedger
-from atlab.models import Side
+from datetime import UTC, datetime
+
+from atlab.models import DecisionAction, JEVDecision, Side
+from atlab.risk import DeterministicRiskEngine
 from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
@@ -148,6 +151,24 @@ class ConflictingRecoveryBroker(FailingBroker):
         )
 
 
+def risk_for(request):
+    decision = JEVDecision(
+        decision_id=request.decision_id,
+        strategy_id="test-strategy",
+        strategy_version="1",
+        symbol=request.symbol,
+        action=DecisionAction.ENTER,
+        side=request.side,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state-1",
+        created_at=datetime.now(UTC),
+    )
+    return DeterministicRiskEngine().evaluate(
+        decision, request.price or request.reference_price, request.quantity
+    )
+
+
 def req():
     return BrokerOrderRequest(
         idempotency_key="intent-1",
@@ -203,7 +224,7 @@ def test_coordinator_uses_constructor_bound_compliance_policy(tmp_path):
         tmp_path, AcceptedBroker(), compliance=compliance
     )
 
-    coordinator_instance.prepare(req())
+    coordinator_instance.prepare(req(), risk_for(req()))
 
     decision = ledger.read()[0].payload
     assert decision["policy_id"] == "constructor-policy"
@@ -243,7 +264,7 @@ def test_live_broker_requires_explicit_execution_authorization(tmp_path):
     coordinator_instance, store, ledger = coordinator(tmp_path, broker)
 
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REQUIRED"):
-        coordinator_instance.submit(req())
+        coordinator_instance.submit(req(), risk_for(req()))
 
     assert broker.submissions == 0
     assert store.get("intent-1") is None
@@ -275,8 +296,8 @@ def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
 
     original_prepare = coordinator_instance.prepare
 
-    def prepare_then_revoke(request):
-        original_prepare(request)
+    def prepare_then_revoke(request, risk_decision=None):
+        original_prepare(request, risk_decision)
         coordinator_instance.revoke_execution_authorization("operator-race-test")
 
     coordinator_instance.prepare = prepare_then_revoke
@@ -855,7 +876,7 @@ def test_compliance_blocks_restricted_symbol_before_intent_creation(tmp_path):
 
     assert broker.submissions == 0
     assert store.get("restricted-1") is None
-    assert ledger.read() == []
+    assert [event.event_type for event in ledger.read()] == ["COMPLIANCE_DECISION"]
 
 
 def test_compliance_allow_is_durably_bound_before_intent(tmp_path):
@@ -898,7 +919,7 @@ def test_compliance_review_required_is_audited_without_execution(tmp_path):
         tmp_path, broker, compliance=compliance
     )
 
-    with pytest.raises(RuntimeError, match="COMPLIANCE_ORDER_REQUIRES_REVIEW"):
+    with pytest.raises(RuntimeError, match="COMPLIANCE_REVIEW_THRESHOLD"):
         coordinator_instance.submit(req())
 
     events = ledger.read()
