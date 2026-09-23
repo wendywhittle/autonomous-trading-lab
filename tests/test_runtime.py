@@ -250,3 +250,134 @@ def test_paper_engine_recovers_incomplete_decision_after_restart(tmp_path):
     assert restarted.run("TEST") == ()
     assert restarted.portfolio.position_quantity == 2
     assert restarted.portfolio.cash == 797
+
+    
+class MalformedJEV:
+    def __init__(self, **updates):
+        self.updates = updates
+
+    def evaluate(self, strategy, state, proposal):
+        return proposal.model_copy(update=self.updates)
+
+
+def test_paper_engine_rejects_jev_identity_tampering(tmp_path):
+    observations = [obs(100, 1), obs(101, 2)]
+    for updates, error in (
+        ({"symbol": "EVIL"}, "JEV_DECISION_SYMBOL_MISMATCH"),
+        ({"strategy_id": "other"}, "JEV_DECISION_STRATEGY_MISMATCH"),
+        ({"strategy_version": "9.9.9"}, "JEV_DECISION_STRATEGY_VERSION_MISMATCH"),
+        ({"state_fingerprint": "forged"}, "JEV_DECISION_STATE_MISMATCH"),
+    ):
+        engine = PaperTradingEngine(
+            InMemoryMarketData(observations),
+            strategy(),
+            DeterministicRiskEngine(),
+            PaperPortfolio(1000),
+            ImmutableLedger(tmp_path / f"{error}.sqlite3"),
+            jev=MalformedJEV(**updates),
+        )
+        with pytest.raises(RuntimeError, match=error):
+            engine.run("TEST")
+        assert engine.ledger.read() == []
+
+
+def test_paper_engine_rejects_jev_side_tampering(tmp_path):
+    observations = [obs(100, 1), obs(101, 2)]
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(tmp_path / "ledger.sqlite3"),
+        jev=MalformedJEV(side="SELL"),
+    )
+
+    with pytest.raises(RuntimeError, match="JEV_DECISION_SIDE_MISMATCH"):
+        engine.run("TEST")
+    assert engine.ledger.read() == []
+
+
+def test_paper_engine_rejects_corrupt_persisted_jev_evaluation(tmp_path):
+    observations = [obs(100, 1), obs(101, 2)]
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    state = build_state(observations, as_of=observations[1].timestamp)
+    proposal = make_decision(strategy(), state)
+    corrupted = proposal.model_copy(
+        update={"decision_id": "jev-corrupt", "symbol": "EVIL"}
+    )
+    ledger.append(
+        "JEV_EVALUATION",
+        f"jev-{proposal.decision_id}",
+        {
+            "proposal_id": proposal.decision_id,
+            "decision": corrupted.model_dump(mode="json"),
+        },
+    )
+
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+    )
+
+    with pytest.raises(RuntimeError, match="JEV_DECISION_SYMBOL_MISMATCH"):
+        engine.run("TEST")
+    assert [event.event_type for event in ledger.read()] == ["JEV_EVALUATION"]
+
+
+def test_paper_engine_rejects_persisted_jev_proposal_mismatch(tmp_path):
+    observations = [obs(100, 1), obs(101, 2)]
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    state = build_state(observations, as_of=observations[1].timestamp)
+    proposal = make_decision(strategy(), state)
+    ledger.append(
+        "JEV_EVALUATION",
+        f"jev-{proposal.decision_id}",
+        {
+            "proposal_id": "forged-proposal",
+            "decision": proposal.model_copy(
+                update={"decision_id": "jev-forged"}
+            ).model_dump(mode="json"),
+        },
+    )
+
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+    )
+
+    with pytest.raises(RuntimeError, match="JEV_EVALUATION_PROPOSAL_MISMATCH"):
+        engine.run("TEST")
+
+
+def test_jev_exit_side_is_deterministically_sell():
+    from atlab.jev import TypeSafeJEV
+
+    class Answer:
+        choice = "EXIT"
+        confidence = 0.9
+        probabilities = {"HOLD": 0.05, "ENTER": 0.05, "EXIT": 0.9}
+
+    class Response:
+        choices = {"action": Answer()}
+
+    class Client:
+        def system_one(self, **kwargs):
+            return Response()
+
+    strategy_value = strategy()
+    state = build_state(
+        [obs(100, 1), obs(99, 2)],
+        as_of=obs(99, 2).timestamp,
+    )
+    proposal = make_decision(strategy_value, state)
+    decision = TypeSafeJEV(client=Client()).evaluate(
+        strategy_value, state, proposal
+    )
+    assert decision.action.value == "EXIT"
+    assert decision.side.value == "SELL"
