@@ -946,3 +946,17 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
         coordinator_instance.submit(req())
 
     assert broker.submissions == 0
+
+
+def test_paper_execution_intent_has_no_live_authorization_binding(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.PAPER
+    coordinator_instance, store, _ = coordinator(tmp_path, broker)
+
+    coordinator_instance.submit(req())
+
+    intent = store.get("intent-1")
+    assert intent.authorization_id is None
+    assert intent.authorization_fingerprint is None
+    assert intent.authorization_issued_at is None
+    assert intent.authorization_expires_at is None
