@@ -14,10 +14,11 @@ from atlab.coordinator import ExecutionCoordinator, IntentStatus
 from atlab.execution import ExecutionIntentStore
 from atlab.ledger import ImmutableLedger
 from atlab.models import Side
+from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
 class FailingBroker:
-    mode = BrokerMode.LIVE
+    mode = BrokerMode.PAPER
 
     def submit(self, request):
         raise TimeoutError("provider timeout")
@@ -41,7 +42,7 @@ class FailingBroker:
 
 
 class AcceptedBroker:
-    mode = BrokerMode.LIVE
+    mode = BrokerMode.PAPER
 
     def __init__(self):
         self.submissions = 0
@@ -82,7 +83,7 @@ class AcceptedBroker:
 class CrashAfterAcceptanceBroker:
     """Simulates provider durability followed by a client-visible timeout."""
 
-    mode = BrokerMode.LIVE
+    mode = BrokerMode.PAPER
 
     def __init__(self):
         self.submissions = 0
@@ -169,6 +170,53 @@ def test_coordinator_rejects_split_execution_and_ledger_databases(tmp_path):
 
     with pytest.raises(ValueError, match="EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE"):
         ExecutionCoordinator(store, DisabledBroker(), ledger)
+
+
+
+def live_authorization():
+    evidence = PromotionEvidence(
+        tests_green=True,
+        paper_run_complete=True,
+        risk_limits_active=True,
+        kill_switch_verified=True,
+        replay_deterministic=True,
+        no_live_credentials=False,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+        live_credentials_configured=True,
+    )
+    return PromotionGate().authorize(evidence, PromotionMode.LIVE)
+
+
+def test_live_broker_requires_explicit_execution_authorization(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REQUIRED"):
+        coordinator_instance.submit(req())
+
+    assert broker.submissions == 0
+    assert store.get("intent-1") is None
+    assert ledger.read() == []
+
+
+def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+
+    attempt = coordinator_instance.submit(req())
+
+    assert attempt.result.status is BrokerOrderStatus.ACCEPTED
+    assert broker.submissions == 1
+    assert store.get("intent-1").result == attempt.result
+    assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_RESULT",
+    ]
 
 
 def test_coordinator_persists_intent_before_submission(tmp_path):
