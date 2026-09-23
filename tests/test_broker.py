@@ -132,3 +132,33 @@ def test_idempotent_broker_rejects_conflicting_reuse_of_key():
     assert result.status is BrokerOrderStatus.REJECTED
     assert result.message == "IDEMPOTENCY_KEY_CONFLICT"
     assert adapter.submissions == 1
+
+
+def test_broker_result_rejects_accepted_status_conflict():
+    with pytest.raises(ValueError, match="BROKER_RESULT_ACCEPTED_STATUS_CONFLICT"):
+        BrokerOrderResult(
+            accepted=False,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.FILLED,
+            message="forged",
+        )
+
+
+def test_broker_result_rejects_missing_order_id_for_accepted_status():
+    with pytest.raises(ValueError, match="BROKER_RESULT_ORDER_ID_REQUIRED"):
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id=None,
+            status=BrokerOrderStatus.ACCEPTED,
+            message="forged",
+        )
+
+
+def test_broker_result_rejects_rejected_status_marked_accepted():
+    with pytest.raises(ValueError, match="BROKER_RESULT_ACCEPTANCE_STATUS_CONFLICT"):
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.REJECTED,
+            message="forged",
+        )
