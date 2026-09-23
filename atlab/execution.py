@@ -421,6 +421,13 @@ class ExecutionIntentStore:
 
         self._validate_result_for_request(existing.request, existing, result)
 
+        if (
+            existing.result is not None
+            and existing.result.broker_order_id is not None
+            and result.broker_order_id != existing.result.broker_order_id
+        ):
+            raise ValueError("EXECUTION_BROKER_ORDER_ID_CONFLICT")
+
         if existing.result is not None and existing.result != result:
             terminal = {
                 BrokerOrderStatus.FILLED,
