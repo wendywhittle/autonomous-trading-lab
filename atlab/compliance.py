@@ -94,8 +94,12 @@ class ComplianceEngine:
         ):
             return decision(ComplianceAction.BLOCK, "COMPLIANCE_INVALID_PRICE")
 
-        if request.price is not None:
-            notional = request.quantity * request.price
+        effective_price = request.price if request.price is not None else request.reference_price
+        if effective_price is None:
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_REFERENCE_PRICE_REQUIRED")
+
+        if effective_price is not None:
+            notional = request.quantity * effective_price
             if not math.isfinite(notional) or notional <= 0:
                 return decision(ComplianceAction.BLOCK, "COMPLIANCE_INVALID_NOTIONAL")
             if notional > p.max_order_notional:
