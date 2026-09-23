@@ -58,6 +58,7 @@ class ExecutionCoordinator:
         self._compliance = compliance or ComplianceEngine(
             CompliancePolicy(policy_id="default", version="1")
         )
+
     @property
     def compliance(self) -> ComplianceEngine:
         return self._compliance
