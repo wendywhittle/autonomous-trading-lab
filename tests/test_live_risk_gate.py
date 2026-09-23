@@ -160,7 +160,7 @@ def test_live_execution_without_risk_evidence_is_blocked(tmp_path):
 
     assert broker.submissions == 0
     assert store.get(req.idempotency_key) is None
-    assert ledger.read() == []
+    assert [event.event_type for event in ledger.read()] == ["EXECUTION_AUTHORIZATION_ACTIVATED"]
 
 
 def test_live_risk_evidence_is_state_bound_and_persisted(tmp_path):
