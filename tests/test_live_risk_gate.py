@@ -282,7 +282,7 @@ def test_market_order_without_reference_price_is_blocked(tmp_path):
     coordinator, _, _, broker, _ = make_coordinator(tmp_path)
     req = request(price=None)
 
-    with pytest.raises(RuntimeError, match="LIVE_MARKET_ORDER_REFERENCE_PRICE_REQUIRED"):
+    with pytest.raises(RuntimeError, match="LIVE_RISK_DECISION_REQUIRED"):
         coordinator.submit(req)
 
     assert broker.submissions == 0
