@@ -137,7 +137,7 @@ class ExecutionIntentStore:
         existing = self._get_in_connection(connection, request.idempotency_key)
         encoded_request = self._encode_request(request)
         if existing is not None:
-            if self._encode_request(existing.request) != encoded_request:
+            if existing.request != request:
                 raise ValueError("EXECUTION_INTENT_CONFLICT")
             return existing, False
 
