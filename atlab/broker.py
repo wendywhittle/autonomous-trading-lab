@@ -30,6 +30,8 @@ class BrokerOrderRequest:
     side: Side
     quantity: float
     price: float | None = None
+    reference_price: float | None = None
+    decision_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.idempotency_key:
@@ -40,6 +42,8 @@ class BrokerOrderRequest:
             raise ValueError("INVALID_QUANTITY")
         if self.price is not None and self.price <= 0:
             raise ValueError("INVALID_PRICE")
+        if self.reference_price is not None and self.reference_price <= 0:
+            raise ValueError("INVALID_REFERENCE_PRICE")
 
 
 @dataclass(frozen=True)
