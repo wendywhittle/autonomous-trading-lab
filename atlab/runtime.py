@@ -55,7 +55,7 @@ class PaperTradingEngine:
             raise RuntimeError("JEV_DECISION_SIDE_MISMATCH")
         if decision.action.value != "HOLD" and decision.side is None:
             raise RuntimeError("JEV_DECISION_SIDE_MISSING")
-        if decision.decision_id == proposal.decision_id:
+        if not decision.decision_id or decision.decision_id == proposal.decision_id:
             raise RuntimeError("JEV_DECISION_ID_COLLISION")
 
     def __init__(
