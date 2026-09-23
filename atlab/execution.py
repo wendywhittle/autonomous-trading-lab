@@ -29,8 +29,8 @@ class ExecutionIntentStore:
     """SQLite-backed durable execution intent state.
 
     Execution intent state shares the SQLite database file with the immutable
-    audit ledger. Coordinator-level transactions can therefore commit or
-    roll back current execution state and its audit event together.
+    audit ledger. Coordinator-level transactions can therefore commit or roll
+    back current execution state and its audit event together.
     """
 
     def __init__(self, path: str | Path):
@@ -242,6 +242,22 @@ class ExecutionIntentStore:
                     BrokerOrderStatus.ACCEPTED.value,
                     BrokerOrderStatus.PARTIALLY_FILLED.value,
                 ),
+            ).fetchall()
+            return tuple(row[0] for row in rows)
+        finally:
+            connection.close()
+
+    def unknown_keys(self) -> tuple[str, ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT idempotency_key
+                FROM execution_intents
+                WHERE status = ?
+                ORDER BY idempotency_key
+                """,
+                (BrokerOrderStatus.UNKNOWN.value,),
             ).fetchall()
             return tuple(row[0] for row in rows)
         finally:
