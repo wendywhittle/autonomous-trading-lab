@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
 import hashlib
 import json
+import math
+from dataclasses import dataclass
 from enum import Enum
 
 from .broker import BrokerMode, BrokerOrderRequest
@@ -18,12 +18,7 @@ class ComplianceAction(str, Enum):
 
 @dataclass(frozen=True)
 class CompliancePolicy:
-    """Deterministic execution-policy controls.
-
-    This is a control-plane boundary, not a claim of legal or regulatory
-    compliance. Jurisdiction-specific rules can be added as explicit policy
-    versions without delegating the decision to an LLM.
-    """
+    """Deterministic execution-policy controls, not a legal compliance claim."""
 
     policy_id: str
     version: str
@@ -62,65 +57,39 @@ class ComplianceEngine:
             "max_order_notional": p.max_order_notional,
             "review_order_notional": p.review_order_notional,
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
-    def evaluate(
-        self, request: BrokerOrderRequest, mode: BrokerMode
-    ) -> ComplianceDecision:
+    def evaluate(self, request: BrokerOrderRequest, mode: BrokerMode) -> ComplianceDecision:
         p = self.policy
         fingerprint = self._fingerprint()
+
+        def decision(action: ComplianceAction, reason: str) -> ComplianceDecision:
+            return ComplianceDecision(action, reason, p.policy_id, p.version, fingerprint)
+
         if not p.active:
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_POLICY_INACTIVE", p.policy_id, p.version, fingerprint
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_POLICY_INACTIVE")
         if not request.symbol or request.symbol in p.restricted_symbols:
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_SYMBOL_RESTRICTED", p.policy_id, p.version
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_SYMBOL_RESTRICTED")
         if p.allowed_symbols and request.symbol not in p.allowed_symbols:
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_SYMBOL_NOT_ALLOWED", p.policy_id, p.version
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_SYMBOL_NOT_ALLOWED")
         if request.side not in p.allowed_sides:
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_SIDE_NOT_ALLOWED", p.policy_id, p.version
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_SIDE_NOT_ALLOWED")
         if not math.isfinite(request.quantity) or request.quantity <= 0:
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_INVALID_QUANTITY", p.policy_id, p.version
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_INVALID_QUANTITY")
         if request.price is not None and (
             not math.isfinite(request.price) or request.price <= 0
         ):
-            return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_INVALID_PRICE", p.policy_id, p.version
-            )
+            return decision(ComplianceAction.BLOCK, "COMPLIANCE_INVALID_PRICE")
 
         if request.price is not None:
             notional = request.quantity * request.price
             if not math.isfinite(notional) or notional <= 0:
-                return ComplianceDecision(
-                    ComplianceAction.BLOCK,
-                    "COMPLIANCE_INVALID_NOTIONAL",
-                    p.policy_id,
-                    p.version,
-                    fingerprint,
-                )
+                return decision(ComplianceAction.BLOCK, "COMPLIANCE_INVALID_NOTIONAL")
             if notional > p.max_order_notional:
-                return ComplianceDecision(
-                    ComplianceAction.BLOCK,
-                    "COMPLIANCE_ORDER_NOTIONAL_LIMIT",
-                    p.policy_id,
-                    p.version,
-                )
+                return decision(ComplianceAction.BLOCK, "COMPLIANCE_ORDER_NOTIONAL_LIMIT")
             if p.review_order_notional is not None and notional >= p.review_order_notional:
-                return ComplianceDecision(
-                    ComplianceAction.REVIEW_REQUIRED,
-                    "COMPLIANCE_REVIEW_THRESHOLD",
-                    p.policy_id,
-                    p.version,
-                )
+                return decision(ComplianceAction.REVIEW_REQUIRED, "COMPLIANCE_REVIEW_THRESHOLD")
 
-        return ComplianceDecision(
-            ComplianceAction.ALLOW, "COMPLIANCE_ALLOWED", p.policy_id, p.version
-        )
+        return decision(ComplianceAction.ALLOW, "COMPLIANCE_ALLOWED")
