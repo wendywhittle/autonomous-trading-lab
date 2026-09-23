@@ -12,7 +12,12 @@ from atlab.coordinator import ExecutionCoordinator
 from atlab.execution import ExecutionIntentStore
 from atlab.execution_reconciliation import assert_execution_halt, inspect_execution_consistency
 from atlab.ledger import ImmutableLedger
-from atlab.models import Side
+from datetime import UTC, datetime
+
+from atlab.models import DecisionAction, JEVDecision, Side
+from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
+from atlab.risk import DeterministicRiskEngine
+from atlab.risk_state import RiskStateSnapshot
 
 
 def request():
@@ -22,6 +27,56 @@ def request():
         side=Side.BUY,
         quantity=1,
         price=100,
+        decision_id="decision-consistency-1",
+    )
+
+
+
+
+def live_authorization():
+    evidence = PromotionEvidence(
+        tests_green=True,
+        paper_run_complete=True,
+        risk_limits_active=True,
+        kill_switch_verified=True,
+        replay_deterministic=True,
+        no_live_credentials=False,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+        live_credentials_configured=True,
+    )
+    return PromotionGate().authorize(evidence, PromotionMode.LIVE)
+
+
+def live_risk(request):
+    snapshot = RiskStateSnapshot(
+        symbol="TEST",
+        current_position_notional=0,
+        equity=1000,
+        session_start_equity=1000,
+        high_water_mark=1000,
+        available_cash=1000,
+    )
+    decision = JEVDecision(
+        decision_id=request.decision_id,
+        strategy_id="test",
+        strategy_version="1",
+        symbol=request.symbol,
+        action=DecisionAction.ENTER,
+        side=request.side,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state",
+        created_at=datetime.now(UTC),
+    )
+    return DeterministicRiskEngine().evaluate(
+        decision, request.price, request.quantity,
+        equity=1000,
+        session_start_equity=1000,
+        high_water_mark=1000,
+        available_cash=1000,
+        risk_state=snapshot,
     )
 
 
@@ -278,8 +333,24 @@ def test_provider_discovery_reconciles_known_intent(tmp_path):
     db = tmp_path / "execution.sqlite3"
     store = ExecutionIntentStore(db)
     ledger = ImmutableLedger(db)
-    coordinator = ExecutionCoordinator(store, DiscoveringBroker(), ledger)
-    coordinator.prepare(request())
+    broker = DiscoveringBroker()
+    authorization = live_authorization()
+    coordinator = ExecutionCoordinator(
+        store,
+        broker,
+        ledger,
+        authorization=authorization,
+        risk_state_provider=lambda request: RiskStateSnapshot(
+            symbol="TEST",
+            current_position_notional=0,
+            equity=1000,
+            session_start_equity=1000,
+            high_water_mark=1000,
+            available_cash=1000,
+        ),
+    )
+    coordinator.activate_execution_authorization("test-activate")
+    coordinator.prepare(request(), live_risk(request()))
 
     reconciled = coordinator.reconcile_discovered_orders()
 
