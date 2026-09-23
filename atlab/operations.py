@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .execution import ExecutionIntentStore
+from .execution_reconciliation import ExecutionConsistency, inspect_execution_consistency
 from .ledger import ImmutableLedger
 from .observability import (
     LedgerHealth,
@@ -18,6 +20,7 @@ class OperationalHealth:
     healthy: bool
     ledger: LedgerHealth
     portfolio: PortfolioReconciliation
+    execution: ExecutionConsistency
     errors: tuple[str, ...]
 
 
@@ -41,6 +44,7 @@ def inspect_operational_health(
     orders,
     *,
     starting_cash: float,
+    execution_store: ExecutionIntentStore | None = None,
 ) -> OperationalHealth:
     ledger_health = inspect_ledger(ledger)
     portfolio_health = inspect_portfolio_file(
@@ -48,10 +52,20 @@ def inspect_operational_health(
         orders,
         starting_cash=starting_cash,
     )
-    errors = tuple(ledger_health.errors + portfolio_health.errors)
+    execution_health = (
+        inspect_execution_consistency(execution_store, ledger)
+        if execution_store is not None
+        else ExecutionConsistency(True, ())
+    )
+    errors = tuple(
+        ledger_health.errors
+        + portfolio_health.errors
+        + execution_health.errors
+    )
     return OperationalHealth(
         healthy=not errors,
         ledger=ledger_health,
         portfolio=portfolio_health,
+        execution=execution_health,
         errors=errors,
     )
