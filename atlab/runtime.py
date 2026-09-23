@@ -51,7 +51,7 @@ class PaperTradingEngine:
             raise RuntimeError("JEV_DECISION_SYMBOL_MISMATCH")
         if decision.state_fingerprint != state.state_fingerprint:
             raise RuntimeError("JEV_DECISION_STATE_MISMATCH")
-        if decision.side is not None and decision.side.value != expected_side:
+        if decision.side is not None and getattr(decision.side, "value", decision.side) != expected_side:
             raise RuntimeError("JEV_DECISION_SIDE_MISMATCH")
         if decision.action.value != "HOLD" and decision.side is None:
             raise RuntimeError("JEV_DECISION_SIDE_MISSING")
