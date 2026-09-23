@@ -8,7 +8,7 @@ Market data → normalization → causal state → versioned strategy → JEV de
 
 Intelligence may propose decisions, typed evaluation may assess them, deterministic risk controls may block them, and execution remains a separately controlled capability.
 
-JEV is an explicit evaluation boundary, not a simulated capability. The repository defines a provider-independent JEV adapter contract and a fail-closed unconfigured implementation. No local evaluator is presented as JEV.
+JEV is an explicit evaluation boundary, not a simulated capability. The repository defines a provider-independent JEV adapter contract plus a real TypeSafe/Jev implementation. The real adapter reads TYPESAFE_API_KEY from the environment, sends typed Choice judgments to Jev, and maps the returned choice/confidence into the trading decision contract. No local evaluator is presented as JEV.
 
 ## M0 boundary
 
@@ -41,6 +41,10 @@ M0 provides deterministic state construction, immutable strategy-version handlin
 python -m pip install -e ".[dev]"
 pytest
 ruff check .
+
+### Live Jev connectivity
+
+The repository includes a manual GitHub Actions workflow, `Jev live smoke`, that uses the repository secret `TYPESAFE_API_KEY` to make one real TypeSafe/Jev evaluation. It is deliberately manual so ordinary CI never spends API calls. Live brokerage execution remains disabled.
 
 ## Next layers
 
