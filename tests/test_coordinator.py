@@ -158,11 +158,51 @@ def req():
     )
 
 
-def coordinator(tmp_path, broker):
+def coordinator(tmp_path, broker, compliance=None):
     database = tmp_path / "execution.sqlite3"
     store = ExecutionIntentStore(database)
     ledger = ImmutableLedger(database)
-    return ExecutionCoordinator(store, broker, ledger), store, ledger
+    return (
+        ExecutionCoordinator(store, broker, ledger, compliance=compliance),
+        store,
+        ledger,
+    )
+
+
+def test_coordinator_compliance_engine_cannot_be_replaced_after_construction(tmp_path):
+    coordinator_instance, _, _ = coordinator(tmp_path, DisabledBroker())
+
+    replacement = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="weaker-policy",
+            version="999",
+            max_order_notional=1_000_000,
+        )
+    )
+
+    with pytest.raises(AttributeError):
+        coordinator_instance.compliance = replacement
+
+
+def test_coordinator_uses_constructor_bound_compliance_policy(tmp_path):
+    compliance = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="constructor-policy",
+            version="42",
+            max_order_notional=1000,
+        )
+    )
+    coordinator_instance, store, ledger = coordinator(
+        tmp_path, AcceptedBroker(), compliance=compliance
+    )
+
+    coordinator_instance.prepare(req())
+
+    decision = ledger.read()[0].payload
+    assert decision["policy_id"] == "constructor-policy"
+    assert decision["policy_version"] == "42"
+    assert decision["policy_fingerprint"] == compliance._fingerprint()
+    assert store.get("intent-1") is not None
 
 
 def test_coordinator_rejects_split_execution_and_ledger_databases(tmp_path):
@@ -801,8 +841,9 @@ def test_compliance_blocks_restricted_symbol_before_intent_creation(tmp_path):
             restricted_symbols=frozenset({"RESTRICTED"}),
         )
     )
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.compliance = compliance
+    coordinator_instance, store, ledger = coordinator(
+        tmp_path, broker, compliance=compliance
+    )
     request = BrokerOrderRequest(
         idempotency_key="restricted-1",
         symbol="RESTRICTED",
@@ -824,8 +865,9 @@ def test_compliance_allow_is_durably_bound_before_intent(tmp_path):
     compliance = ComplianceEngine(
         CompliancePolicy(policy_id="market-policy", version="7", max_order_notional=1000)
     )
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.compliance = compliance
+    coordinator_instance, store, ledger = coordinator(
+        tmp_path, broker, compliance=compliance
+    )
 
     coordinator_instance.submit(req())
 
@@ -854,8 +896,9 @@ def test_compliance_review_required_is_audited_without_execution(tmp_path):
             review_order_notional=100,
         )
     )
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.compliance = compliance
+    coordinator_instance, store, ledger = coordinator(
+        tmp_path, broker, compliance=compliance
+    )
 
     with pytest.raises(RuntimeError, match="COMPLIANCE_ORDER_REQUIRES_REVIEW"):
         coordinator_instance.submit(req())
@@ -876,8 +919,9 @@ def test_compliance_blocks_order_notional_limit(tmp_path):
             max_order_notional=100,
         )
     )
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
-    coordinator_instance.compliance = compliance
+    coordinator_instance, store, ledger = coordinator(
+        tmp_path, broker, compliance=compliance
+    )
     request = BrokerOrderRequest(
         idempotency_key="large-1",
         symbol="TEST",
