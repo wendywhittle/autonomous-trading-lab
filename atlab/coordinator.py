@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 from enum import Enum
@@ -86,6 +88,24 @@ class ExecutionCoordinator:
         else:
             connection.close()
 
+    @staticmethod
+    def _result_event_id(
+        event_type: str, idempotency_key: str, result: BrokerOrderResult
+    ) -> str:
+        payload = {
+            "idempotency_key": idempotency_key,
+            "broker_order_id": result.broker_order_id,
+            "status": result.status.value,
+            "accepted": result.accepted,
+            "message": result.message,
+            "filled_quantity": result.filled_quantity,
+            "remaining_quantity": result.remaining_quantity,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+        return f"{event_type.lower()}-{idempotency_key}-{digest}"
+
     def _commit_result(
         self,
         idempotency_key: str,
@@ -98,7 +118,7 @@ class ExecutionCoordinator:
             self.ledger._append_in_connection(
                 connection,
                 event_type,
-                self._event_id(event_type, idempotency_key),
+                self._result_event_id(event_type, idempotency_key, result),
                 {
                     "idempotency_key": idempotency_key,
                     "broker_order_id": result.broker_order_id,
@@ -124,7 +144,7 @@ class ExecutionCoordinator:
                 existing_events = [
                     event for event in self.ledger.read()
                     if event.event_id
-                    == self._event_id(event_type, idempotency_key)
+                    == self._result_event_id(event_type, idempotency_key, result)
                 ]
                 connection.execute("ROLLBACK")
                 connection.close()
