@@ -694,3 +694,28 @@ def test_new_live_authorization_replaces_previous_active_session(tmp_path):
     assert first_id != second_id
     assert not store.authorization_is_active(first_id)
     assert store.authorization_is_active(second_id)
+
+
+
+def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    first, store, ledger = coordinator(tmp_path, broker)
+    first.authorization = live_authorization()
+    first.submit(req())
+    first.revoke_execution_authorization("operator-revoke")
+
+    second, _, _ = coordinator(tmp_path, broker)
+    second.authorization = first.authorization
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
+        second.submit(
+            BrokerOrderRequest(
+                idempotency_key="intent-2",
+                symbol="TEST",
+                side=Side.BUY,
+                quantity=1,
+                price=100,
+            )
+        )
+    assert broker.submissions == 1
+    assert store.get("intent-2") is None
