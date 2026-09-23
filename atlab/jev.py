@@ -99,7 +99,7 @@ class TypeSafeJEV:
         decision_material = {
             "proposal_id": proposal.decision_id,
             "state_fingerprint": state.state_fingerprint,
-            "action": DecisionAction(action),
+            "action": action,
             "confidence": confidence,
             "probabilities": probabilities,
         }
@@ -110,7 +110,7 @@ class TypeSafeJEV:
         return proposal.model_copy(
             update={
                 "decision_id": decision_id,
-                "action": action,
+                "action": DecisionAction(action),
                 "confidence": confidence,
                 "rationale": rationale,
                 "created_at": proposal.created_at,
