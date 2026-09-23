@@ -478,11 +478,11 @@ class ExecutionCoordinator:
             raise RuntimeError("LIVE_RISK_DECISION_REQUIRED")
         if request.decision_id == request.idempotency_key:
             raise RuntimeError("LIVE_DECISION_ID_REQUIRED")
+        if risk_decision.risk_limits_fingerprint != self._risk.limits.fingerprint():
+            raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
         DeterministicRiskEngine.validate_evidence(risk_decision)
         if not risk_decision.risk_state_fingerprint:
             raise RuntimeError("RISK_STATE_EVIDENCE_REQUIRED")
-        if risk_decision.risk_limits_fingerprint != self._risk.limits.fingerprint():
-            raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
         if request.decision_id != risk_decision.decision_id:
             raise RuntimeError("RISK_DECISION_ID_CONFLICT")
         if request.symbol != risk_decision.symbol:
