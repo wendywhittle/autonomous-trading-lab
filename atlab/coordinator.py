@@ -53,11 +53,6 @@ class ExecutionCoordinator:
         self.broker = broker
         self.ledger = ledger
         self.authorization = authorization
-        if (
-            getattr(self.broker, "mode", None) is BrokerMode.LIVE
-            and authorization is not None
-        ):
-            self.store.activate_authorization(authorization.authorization_id)
 
     def _require_execution_authorization(self) -> None:
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
