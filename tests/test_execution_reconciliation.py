@@ -340,6 +340,8 @@ def test_execution_partial_fill_cannot_regress_to_unknown(tmp_path):
             broker_order_id="broker-1",
             status=BrokerOrderStatus.PARTIALLY_FILLED,
             message="PARTIAL",
+            filled_quantity=0.37,
+            remaining_quantity=0.63,
         ),
     )
 
