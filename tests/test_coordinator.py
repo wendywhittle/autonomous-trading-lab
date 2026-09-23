@@ -651,3 +651,46 @@ def test_coordinator_refuses_submission_when_reconciliation_is_unhealthy(tmp_pat
     assert broker.submissions == 0
     assert store.is_halted()
     assert any(event.event_type == "EXECUTION_HALT_ASSERTED" for event in ledger.read())
+
+
+
+def test_live_broker_rejects_revoked_authorization(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+    coordinator_instance.submit(req())
+    coordinator_instance.revoke_execution_authorization("operator-revoke-1")
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
+        coordinator_instance.submit(
+            BrokerOrderRequest(
+                idempotency_key="intent-2",
+                symbol="TEST",
+                side=Side.BUY,
+                quantity=1,
+                price=100,
+            )
+        )
+
+    assert broker.submissions == 1
+    assert store.get("intent-2") is None
+    assert any(event.event_type == "EXECUTION_AUTHORIZATION_REVOKED" for event in ledger.read())
+
+
+def test_new_live_authorization_replaces_previous_active_session(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    first, store, _ = coordinator(tmp_path, broker)
+    first.authorization = live_authorization()
+    first.submit(req())
+    first_id = first.authorization.authorization_id
+
+    second, _, _ = coordinator(tmp_path, broker)
+    second.authorization = live_authorization()
+    second_id = second.authorization.authorization_id
+    store.activate_authorization(second_id)
+
+    assert first_id != second_id
+    assert not store.authorization_is_active(first_id)
+    assert store.authorization_is_active(second_id)
