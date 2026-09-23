@@ -354,3 +354,22 @@ def test_jev_exit_side_is_deterministically_sell():
     )
     assert decision.action.value == "EXIT"
     assert decision.side.value == "SELL"
+
+
+def test_risk_engine_rejects_action_side_mismatch():
+    from atlab.models import DecisionAction, JEVDecision, Side
+
+    decision = JEVDecision(
+        decision_id="invalid-side",
+        strategy_id="momentum",
+        strategy_version="1.0.0",
+        symbol="TEST",
+        action=DecisionAction.ENTER,
+        side=Side.SELL,
+        confidence=1,
+        rationale="malformed",
+        state_fingerprint="state",
+    )
+    result = DeterministicRiskEngine().evaluate(decision, 100, 1)
+    assert not result.approved
+    assert result.reason == "INVALID_DECISION_SIDE"
