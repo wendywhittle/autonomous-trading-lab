@@ -17,8 +17,22 @@ class ExecutionIntent:
     request: BrokerOrderRequest
     status: BrokerOrderStatus = BrokerOrderStatus.UNKNOWN
     result: BrokerOrderResult | None = None
+    authorization_id: str | None = None
+    authorization_fingerprint: str | None = None
+    authorization_issued_at: str | None = None
+    authorization_expires_at: str | None = None
 
     def __post_init__(self) -> None:
+        binding = (
+            self.authorization_id,
+            self.authorization_fingerprint,
+            self.authorization_issued_at,
+            self.authorization_expires_at,
+        )
+        if any(value is not None for value in binding) and not all(
+            value is not None for value in binding
+        ):
+            raise ValueError("EXECUTION_INTENT_AUTHORIZATION_BINDING_INCOMPLETE")
         if self.status is BrokerOrderStatus.UNKNOWN and self.result is None:
             return
         if self.result is None:
@@ -47,10 +61,29 @@ class ExecutionIntentStore:
                 idempotency_key TEXT PRIMARY KEY,
                 request TEXT NOT NULL,
                 status TEXT NOT NULL,
-                result TEXT
+                result TEXT,
+                authorization_id TEXT,
+                authorization_fingerprint TEXT,
+                authorization_issued_at TEXT,
+                authorization_expires_at TEXT
             )
             """
         )
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(execution_intents)").fetchall()
+        }
+        for column in (
+            "authorization_id",
+            "authorization_fingerprint",
+            "authorization_issued_at",
+            "authorization_expires_at",
+        ):
+            if column not in columns:
+                connection.execute(
+                    f"ALTER TABLE execution_intents ADD COLUMN {column} TEXT"
+                )
+
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS execution_halt (
@@ -271,6 +304,10 @@ class ExecutionIntentStore:
             request=self._decode_request(row[1]),
             status=BrokerOrderStatus(row[2]),
             result=self._decode_result(row[3]),
+            authorization_id=row[4],
+            authorization_fingerprint=row[5],
+            authorization_issued_at=row[6],
+            authorization_expires_at=row[7],
         )
 
     def _get_in_connection(
@@ -279,7 +316,9 @@ class ExecutionIntentStore:
         idempotency_key: str,
     ) -> ExecutionIntent | None:
         row = connection.execute(
-            "SELECT idempotency_key, request, status, result "
+            "SELECT idempotency_key, request, status, result, "
+            "authorization_id, authorization_fingerprint, authorization_issued_at, "
+            "authorization_expires_at "
             "FROM execution_intents WHERE idempotency_key = ?",
             (idempotency_key,),
         ).fetchone()
@@ -289,23 +328,38 @@ class ExecutionIntentStore:
         self,
         connection: sqlite3.Connection,
         request: BrokerOrderRequest,
+        authorization_binding: tuple[str, str, str, str] | None = None,
     ) -> tuple[ExecutionIntent, bool]:
         existing = self._get_in_connection(connection, request.idempotency_key)
         encoded_request = self._encode_request(request)
+        expected_binding = authorization_binding or (None, None, None, None)
         if existing is not None:
             if existing.request != request:
                 raise ValueError("EXECUTION_INTENT_CONFLICT")
+            actual_binding = (
+                existing.authorization_id,
+                existing.authorization_fingerprint,
+                existing.authorization_issued_at,
+                existing.authorization_expires_at,
+            )
+            if actual_binding != expected_binding:
+                raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
             return existing, False
 
         connection.execute(
             """
-            INSERT INTO execution_intents(idempotency_key, request, status, result)
-            VALUES (?, ?, ?, NULL)
+            INSERT INTO execution_intents(
+                idempotency_key, request, status, result,
+                authorization_id, authorization_fingerprint,
+                authorization_issued_at, authorization_expires_at
+            )
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
             """,
             (
                 request.idempotency_key,
                 encoded_request,
                 BrokerOrderStatus.UNKNOWN.value,
+                *expected_binding,
             ),
         )
         created = self._get_in_connection(connection, request.idempotency_key)
