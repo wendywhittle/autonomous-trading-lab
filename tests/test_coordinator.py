@@ -397,3 +397,22 @@ def test_provider_recovery_rejects_unrequested_idempotency_key(tmp_path):
 
     with pytest.raises(ValueError, match="EXECUTION_RECOVERY_KEY_CONFLICT"):
         coordinator_instance.recover_unknown()
+
+
+def test_terminal_execution_state_cannot_regress(tmp_path):
+    broker = AcceptedBroker()
+    coordinator_instance, store, _ = coordinator(tmp_path, broker)
+    coordinator_instance.submit(req())
+    filled = broker.get_order("broker-1")
+    coordinator_instance._commit_result("intent-1", filled, "EXECUTION_RECONCILED")
+
+    with pytest.raises(ValueError, match="EXECUTION_TERMINAL_STATE_CONFLICT"):
+        store.update_result(
+            "intent-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.ACCEPTED,
+                message="REGRESSION",
+            ),
+        )
