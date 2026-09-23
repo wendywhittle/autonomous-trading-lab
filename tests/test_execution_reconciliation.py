@@ -73,7 +73,7 @@ def test_execution_consistency_detects_audit_state_conflict(tmp_path):
         """
         UPDATE events
         SET payload = ?
-        WHERE event_type = 'EXECUTION_UNKNOWN'
+        WHERE event_type = 'EXECUTION_RESULT'
         """,
         ('{"accepted":true,"broker_order_id":"wrong","idempotency_key":"consistency-1","message":"CORRUPTED","status":"FILLED"}',),
     )
