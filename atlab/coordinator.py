@@ -22,6 +22,8 @@ from .execution_reconciliation import (
 )
 from .ledger import ImmutableLedger
 from .promotion import ExecutionAuthorization, PromotionGate, PromotionMode
+from .risk import DeterministicRiskEngine
+from .models import DecisionAction, RiskDecision
 
 
 class IntentStatus(str, Enum):
@@ -48,6 +50,7 @@ class ExecutionCoordinator:
         ledger: ImmutableLedger,
         authorization: ExecutionAuthorization | None = None,
         compliance: ComplianceEngine | None = None,
+        risk: DeterministicRiskEngine | None = None,
     ):
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
@@ -58,6 +61,7 @@ class ExecutionCoordinator:
         self._compliance = compliance or ComplianceEngine(
             CompliancePolicy(policy_id="default", version="1")
         )
+        self._risk = risk or DeterministicRiskEngine()
 
     @property
     def broker(self) -> BrokerAdapter:
@@ -223,6 +227,7 @@ class ExecutionCoordinator:
         request: BrokerOrderRequest,
         decision,
         authorization: ExecutionAuthorization | None = None,
+        risk_decision: RiskDecision | None = None,
     ) -> None:
         connection = self._transaction()
         try:
@@ -239,7 +244,7 @@ class ExecutionCoordinator:
                         authorization.expires_at,
                     )
                 _, created = self.store._record_in_connection(
-                    connection, request, authorization_binding
+                    connection, request, authorization_binding, risk_decision
                 )
                 if created:
                     self.ledger._append_in_connection(
@@ -464,8 +469,33 @@ class ExecutionCoordinator:
         else:
             connection.close()
 
-    def prepare(self, request: BrokerOrderRequest) -> None:
+    def _validate_live_risk(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None) -> None:
+        if risk_decision is None:
+            raise RuntimeError("LIVE_RISK_DECISION_REQUIRED")
+        DeterministicRiskEngine.validate_evidence(risk_decision)
+        if risk_decision.risk_limits_fingerprint != self._risk.limits.fingerprint():
+            raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
+        if request.decision_id != risk_decision.decision_id:
+            raise RuntimeError("RISK_DECISION_ID_CONFLICT")
+        if request.symbol != risk_decision.symbol:
+            raise RuntimeError("RISK_SYMBOL_CONFLICT")
+        if request.side is not risk_decision.side:
+            raise RuntimeError("RISK_SIDE_CONFLICT")
+        if request.quantity != risk_decision.quantity:
+            raise RuntimeError("RISK_QUANTITY_CONFLICT")
+        effective_price = request.price if request.price is not None else request.reference_price
+        if effective_price is None:
+            raise RuntimeError("LIVE_MARKET_ORDER_REFERENCE_PRICE_REQUIRED")
+        if effective_price != risk_decision.price:
+            raise RuntimeError("RISK_PRICE_CONFLICT")
+        if risk_decision.action is DecisionAction.HOLD:
+            raise RuntimeError("RISK_HOLD_NOT_EXECUTABLE")
+
+    def prepare(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None = None) -> None:
+        live = getattr(self.broker, "mode", BrokerMode.DISABLED) is BrokerMode.LIVE
         authorization = self._require_execution_authorization()
+        if live:
+            self._validate_live_risk(request, risk_decision)
         decision = self.compliance.evaluate(
             request, getattr(self.broker, "mode", BrokerMode.DISABLED)
         )
@@ -475,13 +505,13 @@ class ExecutionCoordinator:
                 f"{decision.reason}:{decision.policy_id}:{decision.policy_version}"
             )
 
-    def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
+    def submit(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None = None) -> ExecutionAttempt:
         self._require_execution_authorization()
         self.enforce_reconciliation_safety()
         if self.store.is_halted():
             reason = self.store.halt_reason() or "EXECUTION_HALTED"
             raise RuntimeError(f"EXECUTION_HALTED:{reason}")
-        self.prepare(request)
+        self.prepare(request, risk_decision)
         existing = self.store.get(request.idempotency_key)
         if existing is None:
             raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
@@ -499,6 +529,8 @@ class ExecutionCoordinator:
         if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
             if authorization is None:
                 raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+            if existing.risk_fingerprint != risk_decision.risk_fingerprint:
+                raise RuntimeError("EXECUTION_INTENT_RISK_CONFLICT")
             expected_binding = (
                 authorization.authorization_id,
                 PromotionGate.authorization_fingerprint(authorization),
