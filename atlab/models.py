@@ -72,6 +72,7 @@ class RiskDecision(BaseModel):
 
     approved: bool
     reason: str
+    engine_version: str
     max_notional: float = Field(ge=0)
     decision_id: str | None = None
     action: DecisionAction | None = None
