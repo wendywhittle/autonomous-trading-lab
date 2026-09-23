@@ -8,6 +8,8 @@ Market data → normalization → causal state → versioned strategy → JEV de
 
 Intelligence may propose decisions, typed evaluation may assess them, deterministic risk controls may block them, and execution remains a separately controlled capability.
 
+JEV is an explicit evaluation boundary, not a simulated capability. The repository defines a provider-independent JEV adapter contract and a fail-closed unconfigured implementation. No local evaluator is presented as JEV.
+
 ## M0 boundary
 
 M0 provides deterministic state construction, immutable strategy-version handling, hard risk limits, a kill switch with audit events, simulated paper fills, persistent paper portfolio and risk-session state, restart-safe decision/order idempotency, provider-independent broker contracts, durable execution intents, atomic execution-state-plus-audit transactions, operational observability and reconciliation, replay validation, reproducible data snapshots and experiment identity, concurrency stress coverage, and explicit promotion gates.
