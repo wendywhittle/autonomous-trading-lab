@@ -7,6 +7,7 @@ from atlab.broker import (
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatus,
+    BrokerRecoveryResult,
     DisabledBroker,
 )
 from atlab.coordinator import ExecutionCoordinator, IntentStatus
@@ -33,6 +34,9 @@ class FailingBroker:
         )
 
     def reconcile(self, broker_order_ids):
+        return ()
+
+    def reconcile_by_idempotency_keys(self, idempotency_keys):
         return ()
 
 
@@ -64,6 +68,82 @@ class AcceptedBroker:
 
     def reconcile(self, broker_order_ids):
         return tuple(self.get_order(order_id) for order_id in broker_order_ids)
+
+    def reconcile_by_idempotency_keys(self, idempotency_keys):
+        return tuple(
+            BrokerRecoveryResult(
+                idempotency_key=key,
+                result=self.get_order("broker-1"),
+            )
+            for key in idempotency_keys
+        )
+
+
+class CrashAfterAcceptanceBroker:
+    """Simulates provider durability followed by a client-visible timeout."""
+
+    mode = BrokerMode.LIVE
+
+    def __init__(self):
+        self.submissions = 0
+        self.orders = {}
+
+    def submit(self, request):
+        self.submissions += 1
+        result = BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-crash-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED_BEFORE_CLIENT_FAILURE",
+        )
+        self.orders[request.idempotency_key] = result
+        raise TimeoutError("response lost after provider acceptance")
+
+    def cancel(self, broker_order_id):
+        return True
+
+    def get_order(self, broker_order_id):
+        for result in self.orders.values():
+            if result.broker_order_id == broker_order_id:
+                return result
+        return BrokerOrderResult(
+            accepted=False,
+            broker_order_id=broker_order_id,
+            status=BrokerOrderStatus.UNKNOWN,
+            message="NOT_FOUND",
+        )
+
+    def reconcile(self, broker_order_ids):
+        return tuple(
+            self.get_order(order_id)
+            for order_id in broker_order_ids
+            if self.get_order(order_id).status is not BrokerOrderStatus.UNKNOWN
+        )
+
+    def reconcile_by_idempotency_keys(self, idempotency_keys):
+        return tuple(
+            BrokerRecoveryResult(
+                idempotency_key=key,
+                result=self.orders[key],
+            )
+            for key in idempotency_keys
+            if key in self.orders
+        )
+
+
+class ConflictingRecoveryBroker(FailingBroker):
+    def reconcile_by_idempotency_keys(self, idempotency_keys):
+        return (
+            BrokerRecoveryResult(
+                idempotency_key="not-requested",
+                result=BrokerOrderResult(
+                    accepted=True,
+                    broker_order_id="broker-conflict",
+                    status=BrokerOrderStatus.ACCEPTED,
+                    message="CONFLICT",
+                ),
+            ),
+        )
 
 
 def req():
@@ -204,7 +284,6 @@ def test_coordinator_does_not_duplicate_intent_audit_on_retry(tmp_path):
     assert store.pending_keys() == ("intent-1",)
 
 
-
 def test_coordinator_prepare_rolls_back_intent_when_audit_fails(tmp_path, monkeypatch):
     coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
 
@@ -265,3 +344,56 @@ def test_concurrent_prepare_same_key_creates_one_intent_and_one_audit(tmp_path):
     assert store.get("intent-1").request == req()
     events = ledger.read()
     assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
+
+
+def test_provider_accepted_order_is_recovered_by_idempotency_key_after_unknown(tmp_path):
+    broker = CrashAfterAcceptanceBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+
+    attempt = coordinator_instance.submit(req())
+
+    assert attempt.status is IntentStatus.UNKNOWN
+    assert attempt.result.broker_order_id is None
+    assert store.unknown_keys() == ("intent-1",)
+
+    recovered = coordinator_instance.recover_unknown()
+
+    assert len(recovered) == 1
+    assert recovered[0].idempotency_key == "intent-1"
+    assert recovered[0].result.broker_order_id == "broker-crash-1"
+    assert recovered[0].result.status is BrokerOrderStatus.ACCEPTED
+    assert store.get("intent-1").result.broker_order_id == "broker-crash-1"
+    assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_UNKNOWN",
+        "EXECUTION_RECOVERED",
+    ]
+    assert broker.submissions == 1
+
+    coordinator_instance.submit(req())
+    assert broker.submissions == 1
+
+
+def test_unknown_without_provider_match_remains_unknown_and_is_not_resubmitted(tmp_path):
+    broker = FailingBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+
+    coordinator_instance.submit(req())
+    recovered = coordinator_instance.recover_unknown()
+
+    assert recovered == ()
+    assert store.get("intent-1").status is BrokerOrderStatus.UNKNOWN
+    assert store.get("intent-1").result.status is BrokerOrderStatus.UNKNOWN
+    assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_UNKNOWN",
+    ]
+
+
+def test_provider_recovery_rejects_unrequested_idempotency_key(tmp_path):
+    coordinator_instance, _, _ = coordinator(tmp_path, ConflictingRecoveryBroker())
+
+    coordinator_instance.prepare(req())
+
+    with pytest.raises(ValueError, match="EXECUTION_RECOVERY_KEY_CONFLICT"):
+        coordinator_instance.recover_unknown()
