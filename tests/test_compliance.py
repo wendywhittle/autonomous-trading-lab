@@ -49,3 +49,12 @@ def test_inactive_policy_fails_closed():
     decision = engine.evaluate(request(), BrokerMode.PAPER)
     assert decision.action is ComplianceAction.BLOCK
     assert decision.reason == "COMPLIANCE_POLICY_INACTIVE"
+
+
+def test_compliance_engine_rejects_runtime_policy_mutation():
+    engine = ComplianceEngine(CompliancePolicy(policy_id="p", version="1"))
+
+    with pytest.raises(AttributeError, match="COMPLIANCE_ENGINE_IMMUTABLE"):
+        engine.policy = CompliancePolicy(policy_id="p", version="2")
+
+    assert engine.policy.version == "1"
