@@ -191,6 +191,40 @@ class ExecutionCoordinator:
         )
         return ExecutionAttempt(request.idempotency_key, status, result)
 
+    def recover_unknown(self) -> tuple[ExecutionReconciliation, ...]:
+        """Recover provider-accepted orders without ever resubmitting them.
+
+        The provider must return an explicit client-key binding. A provider
+        response for an unrequested key is treated as a reconciliation conflict.
+        If the provider finds nothing, the durable local intent remains UNKNOWN.
+        """
+
+        keys = self.store.unknown_keys()
+        if not keys:
+            return ()
+
+        recovered = self.broker.reconcile_by_idempotency_keys(list(keys))
+        requested = set(keys)
+        seen: set[str] = set()
+        reconciliations: list[ExecutionReconciliation] = []
+
+        for item in recovered:
+            key = item.idempotency_key
+            if key not in requested:
+                raise ValueError("EXECUTION_RECOVERY_KEY_CONFLICT")
+            if key in seen:
+                raise ValueError("EXECUTION_RECOVERY_DUPLICATE_KEY")
+            seen.add(key)
+
+            intent = self.store.get(key)
+            if intent is None or intent.status is not BrokerOrderStatus.UNKNOWN:
+                raise ValueError("EXECUTION_RECOVERY_STATE_CONFLICT")
+
+            self._commit_result(key, item.result, "EXECUTION_RECOVERED")
+            reconciliations.append(ExecutionReconciliation(key, item.result))
+
+        return tuple(reconciliations)
+
     def reconcile(
         self,
         broker_order_ids: list[str],
