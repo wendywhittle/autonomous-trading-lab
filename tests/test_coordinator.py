@@ -79,7 +79,7 @@ def coordinator(tmp_path, broker):
 
 
 def test_coordinator_persists_intent_before_submission(tmp_path):
-    coordinator_instance, _, ledger = coordinator(tmp_path, DisabledBroker())
+    coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
 
     coordinator_instance.prepare(req())
 
@@ -108,7 +108,7 @@ def test_coordinator_marks_provider_failure_unknown_and_audits(tmp_path):
 
 def test_coordinator_audits_accepted_submission(tmp_path):
     broker = AcceptedBroker()
-    coordinator_instance, _, ledger = coordinator(tmp_path, broker)
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
 
     attempt = coordinator_instance.submit(req())
 
