@@ -70,22 +70,33 @@ class ExecutionIntentStore:
         )
         return connection
 
-    def activate_authorization(self, authorization_id: str) -> None:
+    def _activate_authorization_in_connection(
+        self, connection: sqlite3.Connection, authorization_id: str
+    ) -> None:
         if not authorization_id:
             raise ValueError("EXECUTION_AUTHORIZATION_ID_REQUIRED")
+        connection.execute(
+            """
+            INSERT INTO execution_authorization_state(id, active_authorization_id)
+            VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET active_authorization_id = excluded.active_authorization_id
+            """,
+            (authorization_id,),
+        )
+
+    def activate_authorization(self, authorization_id: str) -> None:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO execution_authorization_state(id, active_authorization_id)
-                VALUES (1, ?)
-                ON CONFLICT(id) DO UPDATE SET active_authorization_id = excluded.active_authorization_id
-                """,
-                (authorization_id,),
-            )
+            self._activate_authorization_in_connection(connection, authorization_id)
             connection.execute("COMMIT")
-        finally:
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
             connection.close()
 
     def authorization_state_exists(self) -> bool:
@@ -108,23 +119,35 @@ class ExecutionIntentStore:
         finally:
             connection.close()
 
-    def revoke_authorization(self, authorization_id: str) -> bool:
+    def _revoke_authorization_in_connection(
+        self, connection: sqlite3.Connection, authorization_id: str
+    ) -> bool:
         if not authorization_id:
             raise ValueError("EXECUTION_AUTHORIZATION_ID_REQUIRED")
+        row = connection.execute(
+            "SELECT active_authorization_id FROM execution_authorization_state WHERE id = 1"
+        ).fetchone()
+        active = bool(row and row[0] == authorization_id)
+        if active:
+            connection.execute(
+                "UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1"
+            )
+        return active
+
+    def revoke_authorization(self, authorization_id: str) -> bool:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT active_authorization_id FROM execution_authorization_state WHERE id = 1"
-            ).fetchone()
-            active = bool(row and row[0] == authorization_id)
-            if active:
-                connection.execute(
-                    "UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1"
-                )
+            active = self._revoke_authorization_in_connection(connection, authorization_id)
             connection.execute("COMMIT")
             return active
-        finally:
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
             connection.close()
 
     def halt(self, reason: str) -> None:
