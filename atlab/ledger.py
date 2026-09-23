@@ -45,7 +45,13 @@ class ImmutableLedger:
         connection = self._connect()
         connection.close()
 
-    def append(self, event_type: str, event_id: str, payload: dict) -> LedgerEvent:
+    def _append_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        event_type: str,
+        event_id: str,
+        payload: dict,
+    ) -> LedgerEvent:
         event = LedgerEvent(
             sequence=0,
             event_type=event_type,
@@ -53,13 +59,11 @@ class ImmutableLedger:
             timestamp=datetime.now(UTC),
             payload=payload,
         )
-        connection = self._connect()
+        sequence = connection.execute(
+            "SELECT COALESCE(MAX(sequence) + 1, 0) FROM events"
+        ).fetchone()[0]
+        event = event.model_copy(update={"sequence": sequence})
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            sequence = connection.execute(
-                "SELECT COALESCE(MAX(sequence) + 1, 0) FROM events"
-            ).fetchone()[0]
-            event = event.model_copy(update={"sequence": sequence})
             connection.execute(
                 """
                 INSERT INTO events(sequence, event_type, event_id, timestamp, payload)
@@ -73,13 +77,24 @@ class ImmutableLedger:
                     json.dumps(event.payload, sort_keys=True, separators=(",", ":")),
                 ),
             )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("LEDGER_EVENT_ID_EXISTS") from exc
+        return event
+
+    def append(self, event_type: str, event_id: str, payload: dict) -> LedgerEvent:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            event = self._append_in_connection(
+                connection, event_type, event_id, payload
+            )
             connection.execute("COMMIT")
             return event
-        except sqlite3.IntegrityError as exc:
-            connection.execute("ROLLBACK")
-            raise ValueError("LEDGER_EVENT_ID_EXISTS") from exc
         except Exception:
-            connection.execute("ROLLBACK")
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
             raise
         finally:
             connection.close()
