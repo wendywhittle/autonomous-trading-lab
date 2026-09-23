@@ -66,9 +66,26 @@ class JEVDecision(BaseModel):
 
 
 class RiskDecision(BaseModel):
+    """Immutable, deterministic risk evidence bound to one executable candidate."""
+
+    model_config = ConfigDict(frozen=True)
+
     approved: bool
     reason: str
     max_notional: float = Field(ge=0)
+    decision_id: str | None = None
+    action: DecisionAction | None = None
+    symbol: str | None = None
+    side: Side | None = None
+    quantity: float | None = Field(default=None, gt=0)
+    price: float | None = Field(default=None, gt=0)
+    current_position_notional: float = 0
+    equity: float | None = None
+    session_start_equity: float | None = None
+    high_water_mark: float | None = None
+    available_cash: float | None = None
+    risk_limits_fingerprint: str | None = None
+    risk_fingerprint: str | None = None
 
 
 class PaperOrder(BaseModel):
