@@ -94,7 +94,29 @@ class PaperTradingEngine:
                 as_of=observations[index].timestamp,
             )
             proposal = make_decision(self.strategy, state)
-            decision = self.jev.evaluate(self.strategy, state, proposal) if self.jev else proposal
+            proposal_events = self.ledger.events_for_proposal(proposal.decision_id)
+            evaluation_events = [
+                event
+                for event in proposal_events
+                if event.event_type == "JEV_EVALUATION"
+            ]
+            if evaluation_events:
+                if len(evaluation_events) != 1:
+                    raise RuntimeError("JEV_EVALUATION_DUPLICATE")
+                evaluation_payload = evaluation_events[0].payload
+                decision = JEVDecision.model_validate(evaluation_payload["decision"])
+            elif self.jev:
+                decision = self.jev.evaluate(self.strategy, state, proposal)
+                self.ledger.append(
+                    "JEV_EVALUATION",
+                    f"jev-{proposal.decision_id}",
+                    {
+                        "proposal_id": proposal.decision_id,
+                        "decision": decision.model_dump(mode="json"),
+                    },
+                )
+            else:
+                decision = proposal
             decision_events = self.ledger.events_for_decision(decision.decision_id)
             event_types = {event.event_type for event in decision_events}
 
