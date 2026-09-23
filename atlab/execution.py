@@ -316,6 +316,16 @@ class ExecutionIntentStore:
         finally:
             connection.close()
 
+    def all_keys(self) -> tuple[str, ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT idempotency_key FROM execution_intents ORDER BY idempotency_key"
+            ).fetchall()
+            return tuple(row[0] for row in rows)
+        finally:
+            connection.close()
+
     def unknown_keys(self) -> tuple[str, ...]:
         connection = self._connect()
         try:
