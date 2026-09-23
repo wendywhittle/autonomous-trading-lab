@@ -3,6 +3,7 @@ import pytest
 from atlab.broker import (
     BrokerMode,
     BrokerOrderRequest,
+    BrokerOrderResult,
     BrokerOrderStatus,
     DisabledBroker,
     IdempotentBroker,
