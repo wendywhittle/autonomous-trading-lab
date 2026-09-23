@@ -12,7 +12,11 @@ from .broker import (
     BrokerOrderStatus,
 )
 from .execution import ExecutionIntentStore, ExecutionReconciliation
-from .execution_reconciliation import inspect_execution_consistency, reconciliation_halt_reason
+from .execution_reconciliation import (
+    ExecutionConsistency,
+    inspect_execution_consistency,
+    reconciliation_halt_reason,
+)
 from .ledger import ImmutableLedger
 
 
@@ -331,11 +335,7 @@ class ExecutionCoordinator:
         asserted before any further autonomous submission can proceed.
         """
         discovered = self.broker.discover_open_orders()
-        local_keys = set()
-        for key in self.store.pending_keys():
-            local_keys.add(key)
-        for key in self.store.unknown_keys():
-            local_keys.add(key)
+        local_keys = set(self.store.all_keys())
 
         orphans = [
             item for item in discovered
@@ -348,7 +348,6 @@ class ExecutionCoordinator:
                 + (item.result.broker_order_id or "UNKNOWN")
                 for item in orphans
             )
-            from .execution_reconciliation import ExecutionConsistency
             self.enforce_reconciliation_safety_with_errors(
                 ExecutionConsistency(False, errors)
             )
@@ -370,7 +369,9 @@ class ExecutionCoordinator:
                 reconciliations.append(ExecutionReconciliation(key, item.result))
         return tuple(reconciliations)
 
-    def enforce_reconciliation_safety_with_errors(self, consistency) -> bool:
+    def enforce_reconciliation_safety_with_errors(
+        self, consistency: ExecutionConsistency
+    ) -> bool:
         """Durably halt using an externally constructed reconciliation result."""
         from .execution_reconciliation import reconciliation_halt_reason
         reason = reconciliation_halt_reason(consistency)
