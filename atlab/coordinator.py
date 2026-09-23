@@ -79,9 +79,11 @@ class ExecutionCoordinator:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
         if not PromotionGate.validate_authorization(authorization):
             raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
-        self.store.activate_authorization(authorization.authorization_id)
         connection = self._transaction()
         try:
+            self.store._activate_authorization_in_connection(
+                connection, authorization.authorization_id
+            )
             self.ledger._append_in_connection(
                 connection,
                 "EXECUTION_AUTHORIZATION_ACTIVATED",
@@ -107,10 +109,16 @@ class ExecutionCoordinator:
         authorization = self.authorization
         if authorization is None:
             return
-        if self.store.revoke_authorization(authorization.authorization_id):
-            connection = self._transaction()
-            try:
-                self.ledger._append_in_connection(
+        connection = self._transaction()
+        try:
+            active = self.store._revoke_authorization_in_connection(
+                connection, authorization.authorization_id
+            )
+            if not active:
+                connection.execute("COMMIT")
+                connection.close()
+                return
+            self.ledger._append_in_connection(
                     connection,
                     "EXECUTION_AUTHORIZATION_REVOKED",
                     self._event_id("EXECUTION_AUTHORIZATION_REVOKED", authorization.authorization_id),
