@@ -73,9 +73,20 @@ def req():
 
 
 def coordinator(tmp_path, broker):
-    store = ExecutionIntentStore(tmp_path / "intents.json")
-    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    database = tmp_path / "execution.sqlite3"
+    store = ExecutionIntentStore(database)
+    ledger = ImmutableLedger(database)
     return ExecutionCoordinator(store, broker, ledger), store, ledger
+
+
+def test_coordinator_rejects_split_execution_and_ledger_databases(tmp_path):
+    store = ExecutionIntentStore(tmp_path / "intents.sqlite3")
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE"):
+        ExecutionCoordinator(store, DisabledBroker(), ledger)
 
 
 def test_coordinator_persists_intent_before_submission(tmp_path):
