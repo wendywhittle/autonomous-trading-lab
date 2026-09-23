@@ -365,7 +365,20 @@ class ExecutionCoordinator:
                 self._commit_result(key, item.result, "EXECUTION_RECONCILED")
                 reconciliations.append(ExecutionReconciliation(key, item.result))
             elif intent.result != item.result:
-                self._commit_result(key, item.result, "EXECUTION_RECONCILED")
+                try:
+                    self._commit_result(key, item.result, "EXECUTION_RECONCILED")
+                except ValueError as exc:
+                    if str(exc) not in {
+                        "EXECUTION_TERMINAL_STATE_CONFLICT",
+                        "EXECUTION_STATE_TRANSITION_CONFLICT",
+                    }:
+                        raise
+                    consistency = ExecutionConsistency(
+                        False,
+                        (f"EXECUTION_PROVIDER_STATE_CONFLICT:{key}",),
+                    )
+                    self.enforce_reconciliation_safety_with_errors(consistency)
+                    raise RuntimeError("EXECUTION_PROVIDER_STATE_CONFLICT") from exc
                 reconciliations.append(ExecutionReconciliation(key, item.result))
         return tuple(reconciliations)
 
