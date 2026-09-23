@@ -330,7 +330,7 @@ class ExecutionIntentStore:
         row = connection.execute(
             "SELECT idempotency_key, request, status, result, "
             "authorization_id, authorization_fingerprint, authorization_issued_at, "
-            "authorization_expires_at "
+            "authorization_expires_at, risk_decision, risk_fingerprint "
             "FROM execution_intents WHERE idempotency_key = ?",
             (idempotency_key,),
         ).fetchone()
