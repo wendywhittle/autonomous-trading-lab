@@ -117,12 +117,33 @@ def inspect_execution_consistency(
             "status": intent.result.status.value,
             "accepted": intent.result.accepted,
             "message": intent.result.message,
+            "filled_quantity": intent.result.filled_quantity,
+            "remaining_quantity": intent.result.remaining_quantity,
         }
         for field, value in expected.items():
             if latest.get(field) != value:
                 errors.append(
                     f"EXECUTION_AUDIT_STATE_MISMATCH:{key}:{field}"
                 )
+
+        quantities: list[float] = []
+        for event in result_events:
+            filled = event.payload.get("filled_quantity")
+            remaining = event.payload.get("remaining_quantity")
+            if filled is not None or remaining is not None:
+                if not isinstance(filled, (int, float)) or not isinstance(
+                    remaining, (int, float)
+                ):
+                    errors.append(f"EXECUTION_FILL_AUDIT_INVALID:{key}")
+                else:
+                    if filled < 0 or remaining < 0:
+                        errors.append(f"EXECUTION_FILL_AUDIT_INVALID:{key}")
+                    quantities.append(float(filled))
+        if any(
+            quantities[index] < quantities[index - 1]
+            for index in range(1, len(quantities))
+        ):
+            errors.append(f"EXECUTION_FILL_AUDIT_REGRESSION:{key}")
 
         if intent.status is not intent.result.status:
             errors.append(f"EXECUTION_STATUS_RESULT_MISMATCH:{key}")
