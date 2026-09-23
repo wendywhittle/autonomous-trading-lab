@@ -9,6 +9,7 @@ def evidence(**overrides):
         "kill_switch_verified": True,
         "replay_deterministic": True,
         "no_live_credentials": True,
+        "live_credentials_configured": False,
         "live_execution_implemented": False,
         "live_controls_verified": False,
     }
@@ -30,12 +31,31 @@ def test_promotion_gate_blocks_missing_evidence():
     assert result.failed_requirements == ("REPLAY_NOT_DETERMINISTIC",)
 
 
-def test_live_promotion_requires_explicit_human_approval_and_live_controls():
+def test_live_promotion_requires_live_credentials_execution_controls_and_approval():
     result = PromotionGate().evaluate(
-        evidence(human_approval=True), PromotionMode.LIVE
+        evidence(
+            human_approval=True,
+            live_execution_implemented=True,
+            live_controls_verified=True,
+        ),
+        PromotionMode.LIVE,
     )
     assert not result.eligible
-    assert result.failed_requirements == (
-        "LIVE_EXECUTION_NOT_IMPLEMENTED",
-        "LIVE_CONTROLS_NOT_VERIFIED",
+    assert result.failed_requirements == ("LIVE_CREDENTIALS_NOT_CONFIGURED",)
+
+
+def test_live_promotion_can_authorize_only_when_all_live_requirements_are_present():
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
     )
+    result = PromotionGate().evaluate(approved, PromotionMode.LIVE)
+    assert result.eligible
+
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE)
+    assert authorization.target is PromotionMode.LIVE
+    assert authorization.authorization_id
+    assert authorization.evidence_fingerprint
