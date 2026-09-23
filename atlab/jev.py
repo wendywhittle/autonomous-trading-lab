@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any, Protocol
 
-from .models import DecisionAction, JEVDecision, MarketState, StrategyVersion
+from .models import DecisionAction, JEVDecision, MarketState, Side, StrategyVersion
 
 
 class JEVAdapter(Protocol):
@@ -107,10 +107,18 @@ class TypeSafeJEV:
             json.dumps(decision_material, sort_keys=True, default=str).encode()
         ).hexdigest()[:24]
 
+        evaluated_action = DecisionAction(action)
+        evaluated_side = {
+            DecisionAction.HOLD: None,
+            DecisionAction.ENTER: Side.BUY,
+            DecisionAction.EXIT: Side.SELL,
+        }[evaluated_action]
+
         return proposal.model_copy(
             update={
                 "decision_id": decision_id,
-                "action": DecisionAction(action),
+                "action": evaluated_action,
+                "side": evaluated_side,
                 "confidence": confidence,
                 "rationale": rationale,
                 "created_at": proposal.created_at,
