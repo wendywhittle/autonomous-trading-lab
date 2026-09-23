@@ -243,6 +243,7 @@ def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
     assert store.get("intent-1") is not None
     assert store.get("intent-1").result is None
     assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_AUTHORIZATION_ACTIVATED",
         "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_AUTHORIZATION_REVOKED",
