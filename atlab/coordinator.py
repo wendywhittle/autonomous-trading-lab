@@ -499,7 +499,7 @@ class ExecutionCoordinator:
         decision = self.compliance.evaluate(
             request, getattr(self.broker, "mode", BrokerMode.DISABLED)
         )
-        self._commit_compliance_and_intent(request, decision, authorization)
+        self._commit_compliance_and_intent(request, decision, authorization, risk_decision)
         if decision.action is not ComplianceAction.ALLOW:
             raise RuntimeError(
                 f"{decision.reason}:{decision.policy_id}:{decision.policy_version}"
