@@ -219,6 +219,26 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     ]
 
 
+def test_live_broker_rejects_tampered_authorization(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    authorization = live_authorization()
+    coordinator_instance.authorization = type(authorization)(
+        authorization_id=authorization.authorization_id,
+        target=authorization.target,
+        evidence_fingerprint="tampered",
+    )
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_INVALID"):
+        coordinator_instance.submit(req())
+
+    assert broker.submissions == 0
+    assert store.get("intent-1") is None
+    assert ledger.read() == []
+
+
+
 def test_coordinator_persists_intent_before_submission(tmp_path):
     coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
 
