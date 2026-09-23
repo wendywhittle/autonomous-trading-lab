@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import hashlib
+import json
 from enum import Enum
 
 from .broker import BrokerMode, BrokerOrderRequest
@@ -39,6 +41,7 @@ class ComplianceDecision:
     reason: str
     policy_id: str
     policy_version: str
+    policy_fingerprint: str
 
 
 class ComplianceEngine:
@@ -47,13 +50,28 @@ class ComplianceEngine:
     def __init__(self, policy: CompliancePolicy):
         self.policy = policy
 
+    def _fingerprint(self) -> str:
+        p = self.policy
+        payload = {
+            "policy_id": p.policy_id,
+            "version": p.version,
+            "active": p.active,
+            "allowed_symbols": sorted(p.allowed_symbols),
+            "restricted_symbols": sorted(p.restricted_symbols),
+            "allowed_sides": sorted(side.value for side in p.allowed_sides),
+            "max_order_notional": p.max_order_notional,
+            "review_order_notional": p.review_order_notional,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
     def evaluate(
         self, request: BrokerOrderRequest, mode: BrokerMode
     ) -> ComplianceDecision:
         p = self.policy
+        fingerprint = self._fingerprint()
         if not p.active:
             return ComplianceDecision(
-                ComplianceAction.BLOCK, "COMPLIANCE_POLICY_INACTIVE", p.policy_id, p.version
+                ComplianceAction.BLOCK, "COMPLIANCE_POLICY_INACTIVE", p.policy_id, p.version, fingerprint
             )
         if not request.symbol or request.symbol in p.restricted_symbols:
             return ComplianceDecision(
@@ -86,6 +104,7 @@ class ComplianceEngine:
                     "COMPLIANCE_INVALID_NOTIONAL",
                     p.policy_id,
                     p.version,
+                    fingerprint,
                 )
             if notional > p.max_order_notional:
                 return ComplianceDecision(
