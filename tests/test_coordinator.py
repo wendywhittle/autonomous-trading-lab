@@ -682,6 +682,44 @@ def test_coordinator_refuses_submission_when_reconciliation_is_unhealthy(tmp_pat
 
 
 
+def test_live_authorization_activation_rolls_back_if_audit_fails(tmp_path, monkeypatch):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("AUTHORIZATION_AUDIT_FAILED")
+
+    monkeypatch.setattr(ledger, "_append_in_connection", fail_audit)
+
+    with pytest.raises(RuntimeError, match="AUTHORIZATION_AUDIT_FAILED"):
+        coordinator_instance.activate_execution_authorization("operator-activate")
+
+    assert not store.authorization_state_exists()
+    assert ledger.read() == []
+
+
+def test_live_authorization_revocation_rolls_back_if_audit_fails(tmp_path, monkeypatch):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+    coordinator_instance.activate_execution_authorization("operator-activate")
+    authorization_id = coordinator_instance.authorization.authorization_id
+    assert store.authorization_is_active(authorization_id)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("AUTHORIZATION_AUDIT_FAILED")
+
+    monkeypatch.setattr(ledger, "_append_in_connection", fail_audit)
+
+    with pytest.raises(RuntimeError, match="AUTHORIZATION_AUDIT_FAILED"):
+        coordinator_instance.revoke_execution_authorization("operator-revoke")
+
+    assert store.authorization_is_active(authorization_id)
+
+
 def test_live_broker_rejects_revoked_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
