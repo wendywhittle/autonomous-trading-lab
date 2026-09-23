@@ -36,6 +36,8 @@ class ExecutionCoordinator:
         broker: BrokerAdapter,
         ledger: ImmutableLedger,
     ):
+        if store.path.resolve() != ledger.path.resolve():
+            raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
         self.store = store
         self.broker = broker
         self.ledger = ledger
