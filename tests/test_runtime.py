@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import pytest
 
@@ -331,12 +332,12 @@ def test_jev_exit_side_is_deterministically_sell():
     from atlab.jev import TypeSafeJEV
 
     class Answer:
-        choice = "EXIT"
-        confidence = 0.9
-        probabilities = {"HOLD": 0.05, "ENTER": 0.05, "EXIT": 0.9}
+        choice: ClassVar = "EXIT"
+        confidence: ClassVar = 0.9
+        probabilities: ClassVar = {"HOLD": 0.05, "ENTER": 0.05, "EXIT": 0.9}
 
     class Response:
-        choices = {"action": Answer()}
+        choices: ClassVar = {"action": Answer()}
 
     class Client:
         def system_one(self, **kwargs):
