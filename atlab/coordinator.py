@@ -55,7 +55,14 @@ class ExecutionCoordinator:
         self.broker = broker
         self.ledger = ledger
         self.authorization = authorization
-        self.compliance = compliance or ComplianceEngine(CompliancePolicy(policy_id="default", version="1"))
+        self._compliance = compliance or ComplianceEngine(
+            CompliancePolicy(policy_id="default", version="1")
+        )
+        self._compliance_sealed = True
+
+    @property
+    def compliance(self) -> ComplianceEngine:
+        return self._compliance
 
     def _require_execution_authorization(self) -> ExecutionAuthorization | None:
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
