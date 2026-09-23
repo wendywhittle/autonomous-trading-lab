@@ -105,6 +105,8 @@ class ExecutionCoordinator:
                     "status": result.status.value,
                     "accepted": result.accepted,
                     "message": result.message,
+                    "filled_quantity": result.filled_quantity,
+                    "remaining_quantity": result.remaining_quantity,
                 },
             )
             connection.execute("COMMIT")
@@ -116,6 +118,8 @@ class ExecutionCoordinator:
                     "status": result.status.value,
                     "accepted": result.accepted,
                     "message": result.message,
+                    "filled_quantity": result.filled_quantity,
+                    "remaining_quantity": result.remaining_quantity,
                 }
                 existing_events = [
                     event for event in self.ledger.read()
