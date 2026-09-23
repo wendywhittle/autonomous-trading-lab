@@ -49,6 +49,22 @@ def inspect_execution_consistency(
     finally:
         connection.close()
 
+    known_keys = set(keys)
+    for key in sorted(set(audit_by_key) - known_keys):
+        errors.append(f"EXECUTION_AUDIT_ORPHAN:{key}")
+
+    broker_ids: dict[str, list[str]] = {}
+    for key in keys:
+        intent = store.get(key)
+        if intent is not None and intent.result is not None:
+            broker_id = intent.result.broker_order_id
+            if broker_id:
+                broker_ids.setdefault(broker_id, []).append(key)
+
+    for broker_id, bound_keys in sorted(broker_ids.items()):
+        if len(bound_keys) > 1:
+            errors.append(f"EXECUTION_BROKER_ORDER_ID_DUPLICATE:{broker_id}")
+
     for key in keys:
         intent = store.get(key)
         if intent is None:
@@ -114,3 +130,7 @@ def inspect_execution_consistency(
             errors.append(f"EXECUTION_TERMINAL_AUDIT_MISMATCH:{key}")
 
     return ExecutionConsistency(not errors, tuple(errors))
+
+def execution_requires_halt(consistency: ExecutionConsistency) -> bool:
+    """Return whether autonomous execution must remain blocked."""
+    return not consistency.healthy
