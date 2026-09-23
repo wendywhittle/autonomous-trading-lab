@@ -220,6 +220,33 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     ]
 
 
+def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+
+    original_prepare = coordinator_instance.prepare
+
+    def prepare_then_revoke(request):
+        original_prepare(request)
+        coordinator_instance.revoke_execution_authorization("operator-race-test")
+
+    coordinator_instance.prepare = prepare_then_revoke
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
+        coordinator_instance.submit(req())
+
+    assert broker.submissions == 0
+    assert store.get("intent-1") is not None
+    assert store.get("intent-1").result is None
+    assert [event.event_type for event in ledger.read()] == [
+        "COMPLIANCE_DECISION",
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_AUTHORIZATION_REVOKED",
+    ]
+
+
 def test_live_broker_rejects_tampered_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
