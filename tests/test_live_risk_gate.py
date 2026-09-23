@@ -338,6 +338,36 @@ def test_hold_risk_evidence_cannot_execute(tmp_path):
     assert broker.submissions == 0
 
 
+def test_live_missing_decision_identity_is_rejected(tmp_path):
+    snapshot = state()
+    coordinator, _, _, broker, _ = make_coordinator(
+        tmp_path, provider=lambda request: snapshot
+    )
+    req = BrokerOrderRequest(
+        idempotency_key="risk-1",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=1,
+        price=100,
+    )
+    evidence = risk_for(
+        BrokerOrderRequest(
+            idempotency_key="risk-1",
+            symbol="TEST",
+            side=Side.BUY,
+            quantity=1,
+            price=100,
+            decision_id="decision-1",
+        ),
+        snapshot,
+    )
+
+    with pytest.raises(RuntimeError, match="LIVE_DECISION_ID_REQUIRED"):
+        coordinator.submit(req, evidence)
+
+    assert broker.submissions == 0
+
+
 def test_live_requires_distinct_decision_identity(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
