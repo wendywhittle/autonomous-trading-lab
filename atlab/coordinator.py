@@ -246,6 +246,7 @@ class ExecutionCoordinator:
         self._commit_intent_creation(request)
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
+        self.enforce_reconciliation_safety()
         if self.store.is_halted():
             reason = self.store.halt_reason() or "EXECUTION_HALTED"
             raise RuntimeError(f"EXECUTION_HALTED:{reason}")
@@ -353,10 +354,18 @@ class ExecutionCoordinator:
             raise RuntimeError("EXECUTION_PROVIDER_ORPHAN_DETECTED")
 
         reconciliations = []
+        seen_keys: set[str] = set()
         for item in discovered:
             key = item.idempotency_key
             if key is None:
                 continue
+            if key in seen_keys:
+                consistency = ExecutionConsistency(
+                    False, (f"EXECUTION_PROVIDER_DUPLICATE_KEY:{key}",)
+                )
+                self.enforce_reconciliation_safety_with_errors(consistency)
+                raise RuntimeError("EXECUTION_PROVIDER_DUPLICATE_KEY")
+            seen_keys.add(key)
             intent = self.store.get(key)
             if intent is None:
                 continue
