@@ -101,6 +101,15 @@ def inspect_execution_consistency(
             errors.append(f"EXECUTION_RESULT_AUDIT_MISSING:{key}")
             continue
 
+        for event in result_events:
+            payload = event.payload
+            if payload.get("idempotency_key") != key:
+                errors.append(f"EXECUTION_AUDIT_KEY_MISMATCH:{key}")
+            if event.event_type == "EXECUTION_UNKNOWN" and payload.get("status") != BrokerOrderStatus.UNKNOWN.value:
+                errors.append(f"EXECUTION_UNKNOWN_AUDIT_MISMATCH:{key}")
+            if event.event_type == "EXECUTION_RESULT" and payload.get("status") == BrokerOrderStatus.UNKNOWN.value:
+                errors.append(f"EXECUTION_RESULT_AUDIT_UNKNOWN:{key}")
+
         latest = result_events[-1].payload
         expected = {
             "idempotency_key": key,
