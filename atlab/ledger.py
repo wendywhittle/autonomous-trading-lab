@@ -118,6 +118,14 @@ class ImmutableLedger:
             or event.payload.get("decision_id") == decision_id
         ]
 
+    def events_for_proposal(self, proposal_id: str) -> list[LedgerEvent]:
+        events = self.read()
+        return [
+            event
+            for event in events
+            if event.payload.get("proposal_id") == proposal_id
+        ]
+
     def read(self) -> list[LedgerEvent]:
         connection = self._connect()
         try:
