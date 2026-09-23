@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hashlib
 import json
@@ -38,6 +39,8 @@ class ExecutionAuthorization:
     authorization_id: str
     target: PromotionMode
     evidence_fingerprint: str
+    issued_at: str | None = None
+    expires_at: str | None = None
 
 
 class PromotionGate:
@@ -106,25 +109,52 @@ class PromotionGate:
             return False
         if not authorization.authorization_id or not authorization.evidence_fingerprint:
             return False
+        if not authorization.issued_at or not authorization.expires_at:
+            return False
+        try:
+            issued = datetime.fromisoformat(authorization.issued_at)
+            expires = datetime.fromisoformat(authorization.expires_at)
+            now = datetime.now(timezone.utc)
+            if issued.tzinfo is None or expires.tzinfo is None:
+                return False
+            if expires <= issued or now >= expires or issued > now + timedelta(seconds=5):
+                return False
+        except ValueError:
+            return False
         expected = hashlib.sha256(
-            f"{authorization.target.value}:{authorization.evidence_fingerprint}".encode()
+            f"{authorization.target.value}:{authorization.evidence_fingerprint}:{authorization.issued_at}:{authorization.expires_at}".encode()
         ).hexdigest()
         return authorization.authorization_id == expected
 
     def authorize(
-        self, evidence: PromotionEvidence, target: PromotionMode
+        self,
+        evidence: PromotionEvidence,
+        target: PromotionMode,
+        ttl_seconds: int = 300,
+        now: datetime | None = None,
     ) -> ExecutionAuthorization:
         result = self.evaluate(evidence, target)
         if target is not PromotionMode.LIVE:
             raise RuntimeError("EXECUTION_AUTHORIZATION_LIVE_ONLY")
         if not result.eligible:
             raise RuntimeError("PROMOTION_NOT_ELIGIBLE:" + "|".join(result.failed_requirements))
+        if ttl_seconds <= 0:
+            raise ValueError("EXECUTION_AUTHORIZATION_TTL_INVALID")
+        issued = now or datetime.now(timezone.utc)
+        if issued.tzinfo is None:
+            raise ValueError("EXECUTION_AUTHORIZATION_TIMEZONE_REQUIRED")
+        issued = issued.astimezone(timezone.utc)
+        expires = issued + timedelta(seconds=ttl_seconds)
+        issued_at = issued.isoformat()
+        expires_at = expires.isoformat()
         fingerprint = self._evidence_fingerprint(evidence)
         authorization_id = hashlib.sha256(
-            f"{target.value}:{fingerprint}".encode()
+            f"{target.value}:{fingerprint}:{issued_at}:{expires_at}".encode()
         ).hexdigest()
         return ExecutionAuthorization(
             authorization_id=authorization_id,
             target=target,
             evidence_fingerprint=fingerprint,
+            issued_at=issued_at,
+            expires_at=expires_at,
         )
