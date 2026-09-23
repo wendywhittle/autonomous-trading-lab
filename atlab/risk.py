@@ -75,12 +75,6 @@ class DeterministicRiskEngine:
                 )
             projected_position = current_position_notional + notional
 
-        if projected_position > self.limits.max_position_notional:
-            return RiskDecision(
-                approved=False, reason="POSITION_NOTIONAL_LIMIT",
-                max_notional=self.limits.max_position_notional,
-            )
-
         if equity is not None:
             if equity == 0:
                 return RiskDecision(approved=False, reason="ZERO_EQUITY", max_notional=0)
@@ -89,6 +83,12 @@ class DeterministicRiskEngine:
                     approved=False, reason="LEVERAGE_LIMIT",
                     max_notional=max(0.0, equity * self.limits.max_leverage),
                 )
+
+        if projected_position > self.limits.max_position_notional:
+            return RiskDecision(
+                approved=False, reason="POSITION_NOTIONAL_LIMIT",
+                max_notional=self.limits.max_position_notional,
+            )
 
         return RiskDecision(
             approved=True, reason="APPROVED", max_notional=self.limits.max_order_notional
