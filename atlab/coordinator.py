@@ -437,6 +437,11 @@ class ExecutionCoordinator:
                 existing.result,
             )
 
+        # Re-check LIVE authorization after all deterministic preparation and
+        # immediately before the external side effect. This closes the local
+        # check-then-act window for expiry/revocation that occurs during prepare().
+        self._require_execution_authorization()
+
         try:
             result = self.broker.submit(request)
         except (ConnectionError, OSError, RuntimeError, TimeoutError):
