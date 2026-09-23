@@ -100,10 +100,23 @@ class PromotionGate:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    @staticmethod
+    def validate_authorization(authorization: ExecutionAuthorization) -> bool:
+        if authorization.target is not PromotionMode.LIVE:
+            return False
+        if not authorization.authorization_id or not authorization.evidence_fingerprint:
+            return False
+        expected = hashlib.sha256(
+            f"{authorization.target.value}:{authorization.evidence_fingerprint}".encode()
+        ).hexdigest()
+        return authorization.authorization_id == expected
+
     def authorize(
         self, evidence: PromotionEvidence, target: PromotionMode
     ) -> ExecutionAuthorization:
         result = self.evaluate(evidence, target)
+        if target is not PromotionMode.LIVE:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_LIVE_ONLY")
         if not result.eligible:
             raise RuntimeError("PROMOTION_NOT_ELIGIBLE:" + "|".join(result.failed_requirements))
         fingerprint = self._evidence_fingerprint(evidence)
