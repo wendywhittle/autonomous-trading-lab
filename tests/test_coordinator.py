@@ -331,7 +331,6 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     assert store.get("intent-1").result == attempt.result
     assert [event.event_type for event in ledger.read()] == [
         "COMPLIANCE_DECISION",
-        "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_RESULT",
     ]
@@ -409,7 +408,6 @@ def test_coordinator_marks_provider_failure_unknown_and_audits(tmp_path):
     assert intent.result == attempt.result
     assert [event.event_type for event in ledger.read()] == [
         "COMPLIANCE_DECISION",
-        "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_UNKNOWN",
     ]
@@ -486,7 +484,6 @@ def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
     assert intent.status is BrokerOrderStatus.FILLED
     assert intent.result.status is BrokerOrderStatus.FILLED
     assert [event.event_type for event in ledger.read()] == [
-        "COMPLIANCE_DECISION",
         "COMPLIANCE_DECISION",
         "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
@@ -695,7 +692,6 @@ def test_provider_accepted_order_is_recovered_by_idempotency_key_after_unknown(t
     assert recovered[0].result.status is BrokerOrderStatus.ACCEPTED
     assert store.get("intent-1").result.broker_order_id == "broker-crash-1"
     assert [event.event_type for event in ledger.read()] == [
-        "COMPLIANCE_DECISION",
         "COMPLIANCE_DECISION",
         "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
@@ -953,7 +949,6 @@ def test_compliance_allow_is_durably_bound_before_intent(tmp_path):
 
     events = ledger.read()
     assert [event.event_type for event in events] == [
-        "COMPLIANCE_DECISION",
         "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_RESULT",
