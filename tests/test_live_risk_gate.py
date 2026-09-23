@@ -91,7 +91,7 @@ def risk_for(req):
     return DeterministicRiskEngine().evaluate(decision, req.price or req.reference_price, req.quantity)
 
 
-def coordinator(tmp_path, broker=None):
+def make_make_coordinator(tmp_path, broker=None):
     broker = broker or CountingLiveBroker()
     db = tmp_path / "execution.sqlite3"
     store = ExecutionIntentStore(db)
