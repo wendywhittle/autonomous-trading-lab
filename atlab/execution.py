@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from .broker import BrokerOrderRequest, BrokerOrderResult, BrokerOrderStatus
+from .models import Side
 
 
 @dataclass(frozen=True)
@@ -25,135 +26,220 @@ class ExecutionIntent:
 
 
 class ExecutionIntentStore:
-    """Atomic JSON state for durable execution intent lifecycle."""
+    """SQLite-backed durable execution intent state.
+
+    Execution intent state lives in the same database file as the immutable
+    audit ledger when used by ExecutionCoordinator. This removes the prior
+    JSON-versus-SQLite split-brain between execution state and audit history.
+    """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
 
-    def _read(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise TypeError("INVALID_EXECUTION_INTENT_STATE")
-        return data
-
-    @staticmethod
-    def _encode_request(request: BrokerOrderRequest) -> dict[str, Any]:
-        return {
-            "idempotency_key": request.idempotency_key,
-            "symbol": request.symbol,
-            "side": request.side.value,
-            "quantity": request.quantity,
-            "price": request.price,
-        }
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_intents (
+                idempotency_key TEXT PRIMARY KEY,
+                request TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result TEXT
+            )
+            """
+        )
+        return connection
 
     @staticmethod
-    def _encode_result(result: BrokerOrderResult | None) -> dict[str, Any] | None:
+    def _encode_request(request: BrokerOrderRequest) -> str:
+        return json.dumps(
+            {
+                "idempotency_key": request.idempotency_key,
+                "symbol": request.symbol,
+                "side": request.side.value,
+                "quantity": request.quantity,
+                "price": request.price,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _decode_request(data: str) -> BrokerOrderRequest:
+        encoded = json.loads(data)
+        return BrokerOrderRequest(
+            idempotency_key=encoded["idempotency_key"],
+            symbol=encoded["symbol"],
+            side=Side(encoded["side"]),
+            quantity=float(encoded["quantity"]),
+            price=float(encoded["price"]) if encoded["price"] is not None else None,
+        )
+
+    @staticmethod
+    def _encode_result(result: BrokerOrderResult | None) -> str | None:
         if result is None:
             return None
-        return {
-            "accepted": result.accepted,
-            "broker_order_id": result.broker_order_id,
-            "status": result.status.value,
-            "message": result.message,
-        }
+        return json.dumps(
+            {
+                "accepted": result.accepted,
+                "broker_order_id": result.broker_order_id,
+                "status": result.status.value,
+                "message": result.message,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     @staticmethod
-    def _decode_result(data: dict[str, Any] | None) -> BrokerOrderResult | None:
+    def _decode_result(data: str | None) -> BrokerOrderResult | None:
         if data is None:
             return None
+        encoded = json.loads(data)
         return BrokerOrderResult(
-            accepted=bool(data["accepted"]),
-            broker_order_id=data["broker_order_id"],
-            status=BrokerOrderStatus(data["status"]),
-            message=str(data["message"]),
+            accepted=bool(encoded["accepted"]),
+            broker_order_id=encoded["broker_order_id"],
+            status=BrokerOrderStatus(encoded["status"]),
+            message=str(encoded["message"]),
         )
 
-    def _write(self, data: dict[str, Any]) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(data, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
+    def _initialize(self) -> None:
+        connection = self._connect()
+        connection.close()
+
+    def _row_to_intent(self, row: tuple) -> ExecutionIntent:
+        return ExecutionIntent(
+            idempotency_key=row[0],
+            request=self._decode_request(row[1]),
+            status=BrokerOrderStatus(row[2]),
+            result=self._decode_result(row[3]),
         )
-        temporary.replace(self.path)
 
     def record(self, request: BrokerOrderRequest) -> ExecutionIntent:
-        data = self._read()
-        key = request.idempotency_key
-        existing = data.get(key)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT idempotency_key, request, status, result "
+                "FROM execution_intents WHERE idempotency_key = ?",
+                (request.idempotency_key,),
+            ).fetchone()
+            encoded_request = self._encode_request(request)
+            if existing is not None:
+                if existing[1] != encoded_request:
+                    connection.execute("ROLLBACK")
+                    raise ValueError("EXECUTION_INTENT_CONFLICT")
+                connection.execute("COMMIT")
+                return self._row_to_intent(existing)
 
-        if existing is not None:
-            if existing["request"] != self._encode_request(request):
-                raise ValueError("EXECUTION_INTENT_CONFLICT")
-            return self.get(key)
-
-        data[key] = {
-            "request": self._encode_request(request),
-            "status": BrokerOrderStatus.UNKNOWN.value,
-            "result": None,
-        }
-        self._write(data)
-        return self.get(key)
+            connection.execute(
+                """
+                INSERT INTO execution_intents(idempotency_key, request, status, result)
+                VALUES (?, ?, ?, NULL)
+                """,
+                (
+                    request.idempotency_key,
+                    encoded_request,
+                    BrokerOrderStatus.UNKNOWN.value,
+                ),
+            )
+            row = connection.execute(
+                "SELECT idempotency_key, request, status, result "
+                "FROM execution_intents WHERE idempotency_key = ?",
+                (request.idempotency_key,),
+            ).fetchone()
+            connection.execute("COMMIT")
+            return self._row_to_intent(row)
+        except sqlite3.IntegrityError as exc:
+            connection.execute("ROLLBACK")
+            raise ValueError("EXECUTION_INTENT_CONFLICT") from exc
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        finally:
+            connection.close()
 
     def update_result(
         self,
         idempotency_key: str,
         result: BrokerOrderResult,
     ) -> ExecutionIntent:
-        data = self._read()
-        existing = data.get(idempotency_key)
-        if existing is None:
-            raise KeyError("EXECUTION_INTENT_NOT_FOUND")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT idempotency_key, request, status, result "
+                "FROM execution_intents WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                connection.execute("ROLLBACK")
+                raise KeyError("EXECUTION_INTENT_NOT_FOUND")
 
-        existing["status"] = result.status.value
-        existing["result"] = self._encode_result(result)
-        data[idempotency_key] = existing
-        self._write(data)
-        return self.get(idempotency_key)
+            connection.execute(
+                """
+                UPDATE execution_intents
+                SET status = ?, result = ?
+                WHERE idempotency_key = ?
+                """,
+                (
+                    result.status.value,
+                    self._encode_result(result),
+                    idempotency_key,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT idempotency_key, request, status, result "
+                "FROM execution_intents WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            connection.execute("COMMIT")
+            return self._row_to_intent(updated)
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        finally:
+            connection.close()
 
     def get(self, idempotency_key: str) -> ExecutionIntent | None:
-        data = self._read()
-        encoded = data.get(idempotency_key)
-        if encoded is None:
-            return None
-
-        from .models import Side
-
-        request_data = encoded["request"]
-        request = BrokerOrderRequest(
-            idempotency_key=request_data["idempotency_key"],
-            symbol=request_data["symbol"],
-            side=Side(request_data["side"]),
-            quantity=float(request_data["quantity"]),
-            price=(
-                float(request_data["price"])
-                if request_data["price"] is not None
-                else None
-            ),
-        )
-        result = self._decode_result(encoded.get("result"))
-        return ExecutionIntent(
-            idempotency_key=idempotency_key,
-            request=request,
-            status=BrokerOrderStatus(encoded["status"]),
-            result=result,
-        )
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT idempotency_key, request, status, result "
+                "FROM execution_intents WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            return self._row_to_intent(row) if row is not None else None
+        finally:
+            connection.close()
 
     def pending_keys(self) -> tuple[str, ...]:
-        data = self._read()
-        return tuple(
-            sorted(
-                key
-                for key, value in data.items()
-                if value["status"] in {
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT idempotency_key
+                FROM execution_intents
+                WHERE status IN (?, ?, ?)
+                ORDER BY idempotency_key
+                """,
+                (
                     BrokerOrderStatus.UNKNOWN.value,
                     BrokerOrderStatus.ACCEPTED.value,
                     BrokerOrderStatus.PARTIALLY_FILLED.value,
-                }
-            )
-        )
+                ),
+            ).fetchall()
+            return tuple(row[0] for row in rows)
+        finally:
+            connection.close()
 
 
 @dataclass(frozen=True)
