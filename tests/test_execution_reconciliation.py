@@ -66,8 +66,6 @@ def test_execution_consistency_detects_audit_state_conflict(tmp_path):
 
     # Deliberately corrupt only the audit payload to model an external/manual
     # mutation. The consistency layer must report, never repair, the conflict.
-    import sqlite3
-
     connection = sqlite3.connect(ledger.path)
     connection.execute(
         """
@@ -289,7 +287,7 @@ def test_provider_discovery_reconciles_known_intent(tmp_path):
 
 
 def test_execution_status_transitions_are_monotonic(tmp_path):
-    coordinator, store, ledger = setup(tmp_path)
+    coordinator, store, _ledger = setup(tmp_path)
     coordinator.prepare(request())
 
     accepted = BrokerOrderResult(
