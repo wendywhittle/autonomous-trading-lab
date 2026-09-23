@@ -59,3 +59,23 @@ def test_live_promotion_can_authorize_only_when_all_live_requirements_are_presen
     assert authorization.target is PromotionMode.LIVE
     assert authorization.authorization_id
     assert authorization.evidence_fingerprint
+
+
+
+def test_live_authorization_rejects_tampering():
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE)
+    assert PromotionGate.validate_authorization(authorization)
+
+    tampered = type(authorization)(
+        authorization_id=authorization.authorization_id,
+        target=authorization.target,
+        evidence_fingerprint="tampered",
+    )
+    assert not PromotionGate.validate_authorization(tampered)
