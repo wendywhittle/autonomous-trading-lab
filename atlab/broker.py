@@ -48,6 +48,29 @@ class BrokerOrderResult:
     broker_order_id: str | None
     status: BrokerOrderStatus
     message: str
+    filled_quantity: float | None = None
+    remaining_quantity: float | None = None
+
+    def __post_init__(self) -> None:
+        import math
+
+        if (self.filled_quantity is None) != (self.remaining_quantity is None):
+            raise ValueError("EXECUTION_FILL_QUANTITY_PAIR_REQUIRED")
+        if self.filled_quantity is not None and self.remaining_quantity is not None:
+            if not math.isfinite(self.filled_quantity) or not math.isfinite(
+                self.remaining_quantity
+            ):
+                raise ValueError("INVALID_FILL_QUANTITY")
+            if self.filled_quantity < 0 or self.remaining_quantity < 0:
+                raise ValueError("INVALID_FILL_QUANTITY")
+        if self.status is BrokerOrderStatus.PARTIALLY_FILLED:
+            if self.filled_quantity is None or self.remaining_quantity is None:
+                raise ValueError("PARTIAL_FILL_QUANTITY_REQUIRED")
+            if self.filled_quantity <= 0 or self.remaining_quantity <= 0:
+                raise ValueError("INVALID_PARTIAL_FILL_QUANTITY")
+        if self.status is BrokerOrderStatus.FILLED and self.remaining_quantity is not None:
+            if self.remaining_quantity != 0 or self.filled_quantity <= 0:
+                raise ValueError("INVALID_FILLED_QUANTITY")
 
 
 @dataclass(frozen=True)
