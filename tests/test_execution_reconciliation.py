@@ -284,3 +284,69 @@ def test_provider_discovery_reconciles_known_intent(tmp_path):
     assert len(reconciled) == 1
     assert reconciled[0].idempotency_key == "consistency-1"
     assert store.get("consistency-1").result.broker_order_id == "broker-discovered"
+
+
+def test_execution_status_transitions_are_monotonic(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    coordinator.prepare(request())
+
+    accepted = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.ACCEPTED,
+        message="ACCEPTED",
+    )
+    partial = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.PARTIALLY_FILLED,
+        message="PARTIAL",
+    )
+    filled = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.FILLED,
+        message="FILLED",
+    )
+
+    store.update_result("consistency-1", accepted)
+    store.update_result("consistency-1", partial)
+    store.update_result("consistency-1", filled)
+
+    import pytest
+    with pytest.raises(ValueError, match="EXECUTION_TERMINAL_STATE_CONFLICT"):
+        store.update_result(
+            "consistency-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.CANCELED,
+                message="CANCELED_AFTER_FILL",
+            ),
+        )
+
+
+def test_execution_partial_fill_cannot_regress_to_unknown(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    coordinator.prepare(request())
+    store.update_result(
+        "consistency-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.PARTIALLY_FILLED,
+            message="PARTIAL",
+        ),
+    )
+
+    import pytest
+    with pytest.raises(ValueError, match="EXECUTION_STATE_TRANSITION_CONFLICT"):
+        store.update_result(
+            "consistency-1",
+            BrokerOrderResult(
+                accepted=False,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.UNKNOWN,
+                message="UNKNOWN",
+            ),
+        )
