@@ -960,3 +960,56 @@ def test_paper_execution_intent_has_no_live_authorization_binding(tmp_path):
     assert intent.authorization_fingerprint is None
     assert intent.authorization_issued_at is None
     assert intent.authorization_expires_at is None
+
+
+def test_live_execution_requires_explicit_authorization_activation(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_NOT_ACTIVATED"):
+        coordinator_instance.submit(
+            BrokerOrderRequest(
+                idempotency_key="explicit-auth-1",
+                symbol="TEST",
+                side=Side.BUY,
+                quantity=1,
+                price=100,
+            )
+        )
+
+    assert broker.submissions == 0
+    assert store.get("explicit-auth-1") is None
+    assert ledger.read() == []
+
+
+def test_live_execution_requires_activation_even_when_authorization_state_table_exists(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+
+    connection = store._connect()
+    try:
+        connection.execute(
+            "INSERT INTO execution_authorization_state(id, active_authorization_id) VALUES (1, NULL)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_NOT_ACTIVATED"):
+        coordinator_instance.submit(
+            BrokerOrderRequest(
+                idempotency_key="explicit-auth-2",
+                symbol="TEST",
+                side=Side.BUY,
+                quantity=1,
+                price=100,
+            )
+        )
+
+    assert broker.submissions == 0
+    assert store.get("explicit-auth-2") is None
+    assert ledger.read() == []
