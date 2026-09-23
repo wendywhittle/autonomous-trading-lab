@@ -229,10 +229,34 @@ class ExecutionIntentStore:
                 BrokerOrderStatus.CANCELED,
                 BrokerOrderStatus.REJECTED,
             }
-            if existing.status in terminal:
-                raise ValueError("EXECUTION_TERMINAL_STATE_CONFLICT")
-            if result.status is BrokerOrderStatus.UNKNOWN:
-                raise ValueError("EXECUTION_STATE_REGRESSION")
+            allowed = {
+                BrokerOrderStatus.UNKNOWN: {
+                    BrokerOrderStatus.ACCEPTED,
+                    BrokerOrderStatus.PARTIALLY_FILLED,
+                    BrokerOrderStatus.FILLED,
+                    BrokerOrderStatus.CANCELED,
+                    BrokerOrderStatus.REJECTED,
+                },
+                BrokerOrderStatus.ACCEPTED: {
+                    BrokerOrderStatus.ACCEPTED,
+                    BrokerOrderStatus.PARTIALLY_FILLED,
+                    BrokerOrderStatus.FILLED,
+                    BrokerOrderStatus.CANCELED,
+                    BrokerOrderStatus.REJECTED,
+                },
+                BrokerOrderStatus.PARTIALLY_FILLED: {
+                    BrokerOrderStatus.PARTIALLY_FILLED,
+                    BrokerOrderStatus.FILLED,
+                    BrokerOrderStatus.CANCELED,
+                },
+                BrokerOrderStatus.FILLED: {BrokerOrderStatus.FILLED},
+                BrokerOrderStatus.CANCELED: {BrokerOrderStatus.CANCELED},
+                BrokerOrderStatus.REJECTED: {BrokerOrderStatus.REJECTED},
+            }
+            if result.status not in allowed[existing.status]:
+                if existing.status in terminal:
+                    raise ValueError("EXECUTION_TERMINAL_STATE_CONFLICT")
+                raise ValueError("EXECUTION_STATE_TRANSITION_CONFLICT")
 
         connection.execute(
             """
