@@ -85,6 +85,7 @@ class RiskDecision(BaseModel):
     high_water_mark: float | None = None
     available_cash: float | None = None
     risk_limits_fingerprint: str | None = None
+    risk_state_fingerprint: str | None = None
     risk_fingerprint: str | None = None
 
 
