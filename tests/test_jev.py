@@ -1,5 +1,6 @@
-import pytest
 from typing import ClassVar
+
+import pytest
 
 from atlab.jev import UnconfiguredJEV
 from atlab.models import DecisionAction, JEVDecision, MarketState, Side, StrategyVersion
