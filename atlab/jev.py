@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any, Protocol
 
-from .models import JEVDecision, MarketState, StrategyVersion
+from .models import DecisionAction, JEVDecision, MarketState, StrategyVersion
 
 
 class JEVAdapter(Protocol):
@@ -99,7 +99,7 @@ class TypeSafeJEV:
         decision_material = {
             "proposal_id": proposal.decision_id,
             "state_fingerprint": state.state_fingerprint,
-            "action": action,
+            "action": DecisionAction(action),
             "confidence": confidence,
             "probabilities": probabilities,
         }
