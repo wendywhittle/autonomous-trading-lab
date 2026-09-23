@@ -7,7 +7,7 @@ name = "autonomous-trading-lab"
 version = "0.1.0"
 description = "Research-first autonomous trading laboratory"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.7,<3"]
+dependencies = ["pydantic>=2.7,<3", "typesafe-sdk>=0.7,<0.8"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.6,<1"]
