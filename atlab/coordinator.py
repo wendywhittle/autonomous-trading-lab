@@ -11,6 +11,7 @@ from .broker import (
     BrokerOrderStatus,
 )
 from .execution import ExecutionIntentStore, ExecutionReconciliation
+from .execution_reconciliation import inspect_execution_consistency, reconciliation_halt_reason
 from .ledger import ImmutableLedger
 
 
@@ -157,6 +158,85 @@ class ExecutionCoordinator:
             )
         )
         return ExecutionAttempt(idempotency_key, intent_status, result)
+
+    def enforce_reconciliation_safety(self) -> bool:
+        """Inspect execution state and durably halt on any discrepancy."""
+        consistency = inspect_execution_consistency(self.store, self.ledger)
+        if consistency.healthy:
+            return False
+        reason = reconciliation_halt_reason(consistency)
+        connection = self._transaction()
+        try:
+            connection.execute(
+                """
+                INSERT INTO execution_halt(id, active, reason)
+                VALUES (1, 1, ?)
+                ON CONFLICT(id) DO UPDATE SET active = 1, reason = excluded.reason
+                """,
+                (reason,),
+            )
+            try:
+                self.ledger._append_in_connection(
+                    connection,
+                    "EXECUTION_HALT_ASSERTED",
+                    self._event_id("EXECUTION_HALT_ASSERTED", reason),
+                    {"reason": reason, "errors": list(consistency.errors)},
+                )
+            except ValueError as exc:
+                if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                    raise
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
+        return True
+
+    def clear_halt(self, operator_reference: str) -> None:
+        """Explicitly clear a durable halt only after clean reconciliation."""
+        if not operator_reference:
+            raise ValueError("EXECUTION_HALT_CLEAR_REFERENCE_REQUIRED")
+        consistency = inspect_execution_consistency(self.store, self.ledger)
+        if not consistency.healthy:
+            raise RuntimeError(
+                "EXECUTION_HALT_CLEAR_BLOCKED:" + "|".join(consistency.errors)
+            )
+        current_reason = self.store.halt_reason()
+        if current_reason is None:
+            return
+        event_id = self._event_id(
+            "EXECUTION_HALT_CLEARED",
+            f"{current_reason}:{operator_reference}",
+        )
+        connection = self._transaction()
+        try:
+            connection.execute("UPDATE execution_halt SET active = 0 WHERE id = 1")
+            try:
+                self.ledger._append_in_connection(
+                    connection,
+                    "EXECUTION_HALT_CLEARED",
+                    event_id,
+                    {
+                        "previous_reason": current_reason,
+                        "operator_reference": operator_reference,
+                    },
+                )
+            except ValueError as exc:
+                if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                    raise
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
 
     def prepare(self, request: BrokerOrderRequest) -> None:
         self._commit_intent_creation(request)
