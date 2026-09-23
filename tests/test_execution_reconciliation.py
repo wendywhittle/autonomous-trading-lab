@@ -6,9 +6,9 @@ from atlab.broker import (
     BrokerOrderStatus,
     DisabledBroker,
 )
-from atlab.execution import ExecutionIntentStore
 from atlab.coordinator import ExecutionCoordinator
-from atlab.execution_reconciliation import inspect_execution_consistency, assert_execution_halt
+from atlab.execution import ExecutionIntentStore
+from atlab.execution_reconciliation import assert_execution_halt, inspect_execution_consistency
 from atlab.ledger import ImmutableLedger
 from atlab.models import Side
 
@@ -107,7 +107,7 @@ def test_execution_consistency_detects_missing_created_audit(tmp_path):
 
 
 def test_execution_consistency_detects_orphan_audit(tmp_path):
-    coordinator, store, ledger = setup(tmp_path)
+    _coordinator, store, ledger = setup(tmp_path)
     ledger.append(
         "EXECUTION_RESULT",
         "execution-result-orphan",
@@ -329,7 +329,7 @@ def test_execution_status_transitions_are_monotonic(tmp_path):
 
 
 def test_execution_partial_fill_cannot_regress_to_unknown(tmp_path):
-    coordinator, store, ledger = setup(tmp_path)
+    coordinator, store, _ledger = setup(tmp_path)
     coordinator.prepare(request())
     store.update_result(
         "consistency-1",
