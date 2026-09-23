@@ -243,6 +243,26 @@ class ExecutionCoordinator:
                             "side": request.side.value,
                             "quantity": request.quantity,
                             "price": request.price,
+                            "authorization_id": (
+                                authorization.authorization_id
+                                if authorization is not None
+                                else None
+                            ),
+                            "authorization_fingerprint": (
+                                PromotionGate.authorization_fingerprint(authorization)
+                                if authorization is not None
+                                else None
+                            ),
+                            "authorization_issued_at": (
+                                authorization.issued_at
+                                if authorization is not None
+                                else None
+                            ),
+                            "authorization_expires_at": (
+                                authorization.expires_at
+                                if authorization is not None
+                                else None
+                            ),
                         },
                     )
             connection.execute("COMMIT")
