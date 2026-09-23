@@ -1,7 +1,10 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from atlab.models import DecisionAction, JEVDecision, Side
 from atlab.risk import DeterministicRiskEngine, RiskLimits
+from atlab.risk_state import RiskStateSnapshot
 
 
 def decision(side=Side.BUY):
@@ -62,11 +65,11 @@ def test_risk_evidence_exposes_explicit_engine_version_and_is_deterministic():
 
 def test_risk_evidence_engine_version_is_immutable_and_tampering_is_rejected():
     result = DeterministicRiskEngine().evaluate(decision(), 100, 1)
-    with __import__("pytest").raises(ValueError, match="RISK_ENGINE_VERSION_CONFLICT"):
+    with pytest.raises(ValueError, match="RISK_ENGINE_VERSION_CONFLICT"):
         DeterministicRiskEngine.validate_evidence(
             result.model_copy(update={"engine_version": "tampered"})
         )
-    with __import__("pytest").raises(Exception):
+    with pytest.raises(Exception):
         result.engine_version = "tampered"
 
 
@@ -75,7 +78,7 @@ def test_risk_evidence_fields_are_immutable():
         decision(), 100, 1, current_position_notional=10,
         equity=1_000, session_start_equity=1_000,
         high_water_mark=1_000, available_cash=900,
-        risk_state=__import__("atlab.risk_state", fromlist=["RiskStateSnapshot"]).RiskStateSnapshot(
+        risk_state=RiskStateSnapshot(
             symbol="TEST",
             current_position_notional=10,
             equity=1_000,
