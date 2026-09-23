@@ -6,7 +6,6 @@ from enum import Enum
 
 from .broker import (
     BrokerAdapter,
-    BrokerDiscoveredOrder,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatus,
