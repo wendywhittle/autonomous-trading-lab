@@ -257,12 +257,15 @@ class ExecutionIntentStore:
         elif result.status is BrokerOrderStatus.FILLED:
             if abs(filled - request.quantity) > 1e-9 or remaining != 0:
                 raise ValueError("INVALID_FILLED_QUANTITY")
-        elif result.status in {
-            BrokerOrderStatus.CANCELED,
-            BrokerOrderStatus.REJECTED,
-        }:
-            if filled > request.quantity or remaining < 0:
-                raise ValueError("INVALID_TERMINAL_FILL_QUANTITY")
+        elif (
+            result.status
+            in {
+                BrokerOrderStatus.CANCELED,
+                BrokerOrderStatus.REJECTED,
+            }
+            and (filled > request.quantity or remaining < 0)
+        ):
+            raise ValueError("INVALID_TERMINAL_FILL_QUANTITY")
 
     def _update_result_in_connection(
         self,
