@@ -127,7 +127,9 @@ class PaperTradingEngine:
                 for event in proposal_events
                 if event.event_type == "JEV_EVALUATION"
             ]
+            decision_from_jev = False
             if evaluation_events:
+                decision_from_jev = True
                 if len(evaluation_events) != 1:
                     raise RuntimeError("JEV_EVALUATION_DUPLICATE")
                 evaluation_payload = evaluation_events[0].payload
@@ -143,6 +145,7 @@ class PaperTradingEngine:
                     decision, self.strategy, state, proposal
                 )
             elif self.jev:
+                decision_from_jev = True
                 decision = self.jev.evaluate(self.strategy, state, proposal)
                 self._validate_jev_decision(
                     decision, self.strategy, state, proposal
@@ -158,7 +161,7 @@ class PaperTradingEngine:
             else:
                 decision = proposal
             decision_events = self.ledger.events_for_decision(decision.decision_id)
-            if decision_events:
+            if decision_from_jev and decision_events:
                 matching_decision = any(
                     event.event_type == "DECISION"
                     and event.payload == decision.model_dump(mode="json")
