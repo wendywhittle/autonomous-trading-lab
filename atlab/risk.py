@@ -44,7 +44,8 @@ class DeterministicRiskEngine:
                 high_water_mark, available_cash, risk_state_fingerprint=None):
         limits_fingerprint = self.limits.fingerprint()
         evidence = RiskDecision(
-            approved=approved, reason=reason, max_notional=max_notional,
+            approved=approved, reason=reason, engine_version=self.ENGINE_VERSION,
+            max_notional=max_notional,
             decision_id=decision.decision_id, action=decision.action,
             symbol=decision.symbol, side=decision.side, quantity=quantity,
             price=price, current_position_notional=current_position_notional,
@@ -64,10 +65,12 @@ class DeterministicRiskEngine:
             decision.quantity, decision.price, decision.current_position_notional,
             decision.risk_limits_fingerprint,
         )
+        if decision.engine_version != cls.ENGINE_VERSION:
+            raise ValueError("RISK_ENGINE_VERSION_CONFLICT")
         if any(value is None for value in required):
             raise ValueError("RISK_EVIDENCE_INCOMPLETE")
         payload = {
-            "engine_version": cls.ENGINE_VERSION,
+            "engine_version": decision.engine_version,
             "approved": decision.approved, "reason": decision.reason,
             "max_notional": decision.max_notional,
             "decision_id": decision.decision_id,
