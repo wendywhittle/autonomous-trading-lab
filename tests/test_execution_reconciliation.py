@@ -215,3 +215,72 @@ def test_clear_halt_is_audited_after_clean_reconciliation(tmp_path):
         and event.payload["operator_reference"] == "operator-1"
         for event in events
     )
+
+
+def test_provider_discovery_halts_on_order_missing_local_intent(tmp_path):
+    from atlab.broker import BrokerDiscoveredOrder, BrokerMode
+
+    class DiscoveringBroker(DisabledBroker):
+        mode = BrokerMode.LIVE
+
+        def discover_open_orders(self):
+            return (
+                BrokerDiscoveredOrder(
+                    idempotency_key="provider-only",
+                    result=BrokerOrderResult(
+                        accepted=True,
+                        broker_order_id="broker-provider-only",
+                        status=BrokerOrderStatus.ACCEPTED,
+                        message="ACCEPTED",
+                    ),
+                ),
+            )
+
+    db = tmp_path / "execution.sqlite3"
+    store = ExecutionIntentStore(db)
+    ledger = ImmutableLedger(db)
+    coordinator = ExecutionCoordinator(store, DiscoveringBroker(), ledger)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="EXECUTION_PROVIDER_ORPHAN_DETECTED"):
+        coordinator.reconcile_discovered_orders()
+
+    assert store.is_halted()
+    assert "EXECUTION_PROVIDER_ORDER_ORPHAN:broker-provider-only" in store.halt_reason()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_PROVIDER_ORDER_ORPHAN:broker-provider-only" in event.payload["errors"]
+        for event in ledger.read()
+    )
+
+
+def test_provider_discovery_reconciles_known_intent(tmp_path):
+    from atlab.broker import BrokerDiscoveredOrder, BrokerMode
+
+    class DiscoveringBroker(DisabledBroker):
+        mode = BrokerMode.LIVE
+
+        def discover_open_orders(self):
+            return (
+                BrokerDiscoveredOrder(
+                    idempotency_key="consistency-1",
+                    result=BrokerOrderResult(
+                        accepted=True,
+                        broker_order_id="broker-discovered",
+                        status=BrokerOrderStatus.ACCEPTED,
+                        message="ACCEPTED",
+                    ),
+                ),
+            )
+
+    db = tmp_path / "execution.sqlite3"
+    store = ExecutionIntentStore(db)
+    ledger = ImmutableLedger(db)
+    coordinator = ExecutionCoordinator(store, DiscoveringBroker(), ledger)
+    coordinator.prepare(request())
+
+    reconciled = coordinator.reconcile_discovered_orders()
+
+    assert len(reconciled) == 1
+    assert reconciled[0].idempotency_key == "consistency-1"
+    assert store.get("consistency-1").result.broker_order_id == "broker-discovered"
