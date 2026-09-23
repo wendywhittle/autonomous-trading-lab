@@ -11,6 +11,7 @@ from atlab.broker import (
     DisabledBroker,
 )
 from atlab.coordinator import ExecutionCoordinator, IntentStatus
+from atlab.compliance import ComplianceEngine, CompliancePolicy
 from atlab.execution import ExecutionIntentStore
 from atlab.ledger import ImmutableLedger
 from atlab.models import Side
@@ -719,3 +720,57 @@ def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp
         )
     assert broker.submissions == 1
     assert store.get("intent-2") is None
+
+
+def test_compliance_blocks_restricted_symbol_before_intent_creation(tmp_path):
+    broker = AcceptedBroker()
+    compliance = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="market-policy",
+            version="1",
+            restricted_symbols=frozenset({"RESTRICTED"}),
+        )
+    )
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.compliance = compliance
+    request = BrokerOrderRequest(
+        idempotency_key="restricted-1",
+        symbol="RESTRICTED",
+        side=Side.BUY,
+        quantity=1,
+        price=100,
+    )
+
+    with pytest.raises(RuntimeError, match="COMPLIANCE_SYMBOL_RESTRICTED"):
+        coordinator_instance.submit(request)
+
+    assert broker.submissions == 0
+    assert store.get("restricted-1") is None
+    assert ledger.read() == []
+
+
+def test_compliance_blocks_order_notional_limit(tmp_path):
+    broker = AcceptedBroker()
+    compliance = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="market-policy",
+            version="1",
+            max_order_notional=100,
+        )
+    )
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.compliance = compliance
+    request = BrokerOrderRequest(
+        idempotency_key="large-1",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=2,
+        price=100,
+    )
+
+    with pytest.raises(RuntimeError, match="COMPLIANCE_ORDER_NOTIONAL_LIMIT"):
+        coordinator_instance.submit(request)
+
+    assert broker.submissions == 0
+    assert store.get("large-1") is None
+    assert ledger.read() == []
