@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from enum import Enum
 
+from .compliance import ComplianceAction, ComplianceEngine, CompliancePolicy
 from .broker import (
     BrokerAdapter,
     BrokerMode,
@@ -46,6 +47,7 @@ class ExecutionCoordinator:
         broker: BrokerAdapter,
         ledger: ImmutableLedger,
         authorization: ExecutionAuthorization | None = None,
+        compliance: ComplianceEngine | None = None,
     ):
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
@@ -53,6 +55,7 @@ class ExecutionCoordinator:
         self.broker = broker
         self.ledger = ledger
         self.authorization = authorization
+        self.compliance = compliance or ComplianceEngine(CompliancePolicy(policy_id="default", version="1"))
 
     def _require_execution_authorization(self) -> None:
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
@@ -343,6 +346,9 @@ class ExecutionCoordinator:
             connection.close()
 
     def prepare(self, request: BrokerOrderRequest) -> None:
+        decision = self.compliance.evaluate(request, getattr(self.broker, "mode", BrokerMode.DISABLED))
+        if decision.action is not ComplianceAction.ALLOW:
+            raise RuntimeError(f"{decision.reason}:{decision.policy_id}:{decision.policy_version}")
         self._commit_intent_creation(request)
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
