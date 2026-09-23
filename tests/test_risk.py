@@ -50,3 +50,49 @@ def test_invalid_cash_and_equity_are_blocked():
     assert not DeterministicRiskEngine().evaluate(
         decision(), 100, 1, equity=-1
     ).approved
+
+
+def test_risk_evidence_exposes_explicit_engine_version_and_is_deterministic():
+    engine = DeterministicRiskEngine()
+    result = engine.evaluate(decision(), 100, 1)
+    assert result.engine_version == DeterministicRiskEngine.ENGINE_VERSION
+    assert result.risk_fingerprint == DeterministicRiskEngine.fingerprint_for(result)
+    assert result.risk_fingerprint == DeterministicRiskEngine.fingerprint_for(result)
+
+
+def test_risk_evidence_engine_version_is_immutable_and_tampering_is_rejected():
+    result = DeterministicRiskEngine().evaluate(decision(), 100, 1)
+    with __import__("pytest").raises(ValueError, match="RISK_ENGINE_VERSION_CONFLICT"):
+        DeterministicRiskEngine.validate_evidence(
+            result.model_copy(update={"engine_version": "tampered"})
+        )
+    with __import__("pytest").raises(Exception):
+        result.engine_version = "tampered"
+
+
+def test_risk_evidence_fields_are_immutable():
+    result = DeterministicRiskEngine().evaluate(
+        decision(), 100, 1, current_position_notional=10,
+        equity=1_000, session_start_equity=1_000,
+        high_water_mark=1_000, available_cash=900,
+        risk_state=__import__("atlab.risk_state", fromlist=["RiskStateSnapshot"]).RiskStateSnapshot(
+            symbol="TEST",
+            current_position_notional=10,
+            equity=1_000,
+            session_start_equity=1_000,
+            high_water_mark=1_000,
+            available_cash=900,
+        ),
+    )
+    for field, value in (
+        ("risk_state_fingerprint", "tampered"),
+        ("risk_limits_fingerprint", "tampered"),
+        ("risk_fingerprint", "tampered"),
+        ("quantity", 2),
+        ("price", 101),
+        ("symbol", "OTHER"),
+        ("side", Side.SELL),
+        ("engine_version", "tampered"),
+    ):
+        with __import__("pytest").raises(Exception):
+            result.__setattr__(field, value)
