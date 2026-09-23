@@ -131,16 +131,16 @@ class ExecutionCoordinator:
                 connection.close()
                 return
             self.ledger._append_in_connection(
-                    connection,
-                    "EXECUTION_AUTHORIZATION_REVOKED",
-                    self._event_id("EXECUTION_AUTHORIZATION_REVOKED", authorization.authorization_id),
-                    {
-                        "authorization_id": authorization.authorization_id,
-                        "operator_reference": operator_reference,
-                    },
-                )
-                connection.execute("COMMIT")
-            except Exception:
+                connection,
+                "EXECUTION_AUTHORIZATION_REVOKED",
+                self._event_id("EXECUTION_AUTHORIZATION_REVOKED", authorization.authorization_id),
+                {
+                    "authorization_id": authorization.authorization_id,
+                    "operator_reference": operator_reference,
+                },
+            )
+            connection.execute("COMMIT")
+        except Exception:
                 try:
                     connection.execute("ROLLBACK")
                 finally:
