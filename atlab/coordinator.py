@@ -459,24 +459,74 @@ class ExecutionCoordinator:
         self,
         broker_order_ids: list[str],
     ) -> tuple[ExecutionReconciliation, ...]:
+        requested = set(broker_order_ids)
+        if len(requested) != len(broker_order_ids):
+            consistency = ExecutionConsistency(
+                False, ("EXECUTION_RECONCILE_DUPLICATE_REQUESTED_ORDER_ID",)
+            )
+            self.enforce_reconciliation_safety_with_errors(consistency)
+            raise RuntimeError("EXECUTION_RECONCILE_DUPLICATE_REQUESTED_ORDER_ID")
+
         results = self.broker.reconcile(broker_order_ids)
         reconciliations: list[ExecutionReconciliation] = []
+        seen: set[str] = set()
 
         for result in results:
-            if result.broker_order_id is None:
+            broker_order_id = result.broker_order_id
+            if broker_order_id is None:
                 continue
+            if broker_order_id not in requested:
+                consistency = ExecutionConsistency(
+                    False,
+                    (f"EXECUTION_RECONCILE_UNREQUESTED_ORDER:{broker_order_id}",),
+                )
+                self.enforce_reconciliation_safety_with_errors(consistency)
+                raise RuntimeError("EXECUTION_RECONCILE_UNREQUESTED_ORDER")
+            if broker_order_id in seen:
+                consistency = ExecutionConsistency(
+                    False,
+                    (f"EXECUTION_RECONCILE_DUPLICATE_RESULT:{broker_order_id}",),
+                )
+                self.enforce_reconciliation_safety_with_errors(consistency)
+                raise RuntimeError("EXECUTION_RECONCILE_DUPLICATE_RESULT")
+            seen.add(broker_order_id)
+
+            matched_key = None
             for key in self.store.pending_keys():
                 intent = self.store.get(key)
                 if intent is None or intent.result is None:
                     continue
-                if intent.result.broker_order_id != result.broker_order_id:
-                    continue
+                if intent.result.broker_order_id == broker_order_id:
+                    matched_key = key
+                    break
+
+            if matched_key is None:
+                consistency = ExecutionConsistency(
+                    False,
+                    (f"EXECUTION_RECONCILE_UNBOUND_ORDER:{broker_order_id}",),
+                )
+                self.enforce_reconciliation_safety_with_errors(consistency)
+                raise RuntimeError("EXECUTION_RECONCILE_UNBOUND_ORDER")
+
+            try:
                 self._commit_result(
-                    key, result, "EXECUTION_RECONCILED"
+                    matched_key, result, "EXECUTION_RECONCILED"
                 )
-                reconciliations.append(
-                    ExecutionReconciliation(key, result)
+            except ValueError as exc:
+                if str(exc) not in {
+                    "EXECUTION_TERMINAL_STATE_CONFLICT",
+                    "EXECUTION_STATE_TRANSITION_CONFLICT",
+                }:
+                    raise
+                consistency = ExecutionConsistency(
+                    False,
+                    (f"EXECUTION_RECONCILE_STATE_CONFLICT:{matched_key}",),
                 )
-                break
+                self.enforce_reconciliation_safety_with_errors(consistency)
+                raise RuntimeError("EXECUTION_RECONCILE_STATE_CONFLICT") from exc
+
+            reconciliations.append(
+                ExecutionReconciliation(matched_key, result)
+            )
 
         return tuple(reconciliations)
