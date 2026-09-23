@@ -416,3 +416,31 @@ def test_terminal_execution_state_cannot_regress(tmp_path):
                 message="REGRESSION",
             ),
         )
+
+
+def test_coordinator_blocks_submission_when_durable_halt_is_active(tmp_path):
+    broker = AcceptedBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    store.halt("EXECUTION_AUDIT_ORPHAN:bad-key")
+
+    with pytest.raises(
+        RuntimeError,
+        match="EXECUTION_HALTED:EXECUTION_AUDIT_ORPHAN:bad-key",
+    ):
+        coordinator_instance.submit(req())
+
+    assert broker.submissions == 0
+    assert store.get("intent-1") is None
+    assert [event.event_type for event in ledger.read()] == []
+
+
+def test_durable_halt_can_be_cleared_explicitly(tmp_path):
+    _, store, _ = coordinator(tmp_path, DisabledBroker())
+    store.halt("TEST_HALT")
+    assert store.is_halted()
+    assert store.halt_reason() == "TEST_HALT"
+
+    store.clear_halt()
+
+    assert not store.is_halted()
+    assert store.halt_reason() is None
