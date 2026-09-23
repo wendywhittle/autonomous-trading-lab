@@ -63,6 +63,21 @@ class BrokerOrderResult:
                 raise ValueError("INVALID_FILL_QUANTITY")
             if self.filled_quantity < 0 or self.remaining_quantity < 0:
                 raise ValueError("INVALID_FILL_QUANTITY")
+        if self.status in {
+            BrokerOrderStatus.ACCEPTED,
+            BrokerOrderStatus.PARTIALLY_FILLED,
+            BrokerOrderStatus.FILLED,
+            BrokerOrderStatus.CANCELED,
+        }:
+            if not self.accepted:
+                raise ValueError("BROKER_RESULT_ACCEPTED_STATUS_CONFLICT")
+            if not self.broker_order_id:
+                raise ValueError("BROKER_RESULT_ORDER_ID_REQUIRED")
+        elif self.status in {
+            BrokerOrderStatus.REJECTED,
+            BrokerOrderStatus.UNKNOWN,
+        } and self.accepted:
+            raise ValueError("BROKER_RESULT_ACCEPTANCE_STATUS_CONFLICT")
         if self.status is BrokerOrderStatus.PARTIALLY_FILLED:
             if self.filled_quantity is None or self.remaining_quantity is None:
                 raise ValueError("PARTIAL_FILL_QUANTITY_REQUIRED")
