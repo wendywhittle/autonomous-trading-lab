@@ -1,7 +1,8 @@
 import pytest
+from typing import ClassVar
 
 from atlab.jev import UnconfiguredJEV
-from atlab.models import JEVDecision, DecisionAction, MarketState, Side, StrategyVersion
+from atlab.models import DecisionAction, JEVDecision, MarketState, Side, StrategyVersion
 
 
 def test_jev_boundary_fails_closed_without_real_implementation():
@@ -35,11 +36,11 @@ def test_jev_boundary_fails_closed_without_real_implementation():
 class _Answer:
     choice = "ENTER"
     confidence = 0.91
-    probabilities = {"HOLD": 0.04, "ENTER": 0.91, "EXIT": 0.05}
+    probabilities: ClassVar = {"HOLD": 0.04, "ENTER": 0.91, "EXIT": 0.05}
 
 
 class _Response:
-    choices = {"action": _Answer()}
+    choices: ClassVar = {"action": _Answer()}
 
 
 class _Client:
