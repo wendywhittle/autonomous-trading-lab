@@ -20,7 +20,7 @@ from .execution_reconciliation import (
     reconciliation_halt_reason,
 )
 from .ledger import ImmutableLedger
-from .promotion import ExecutionAuthorization, PromotionMode
+from .promotion import ExecutionAuthorization, PromotionGate, PromotionMode
 
 
 class IntentStatus(str, Enum):
@@ -60,7 +60,7 @@ class ExecutionCoordinator:
         authorization = self.authorization
         if authorization is None or authorization.target is not PromotionMode.LIVE:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
-        if not authorization.authorization_id or not authorization.evidence_fingerprint:
+        if not PromotionGate.validate_authorization(authorization):
             raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
 
     def _transaction(self) -> sqlite3.Connection:
