@@ -104,6 +104,14 @@ class PromotionGate:
         ).hexdigest()
 
     @staticmethod
+    def authorization_fingerprint(authorization: ExecutionAuthorization) -> str:
+        if not authorization.issued_at or not authorization.expires_at:
+            raise ValueError("EXECUTION_AUTHORIZATION_TIMESTAMP_REQUIRED")
+        return hashlib.sha256(
+            f"{authorization.target.value}:{authorization.evidence_fingerprint}:{authorization.issued_at}:{authorization.expires_at}".encode()
+        ).hexdigest()
+
+    @staticmethod
     def validate_authorization(authorization: ExecutionAuthorization) -> bool:
         if authorization.target is not PromotionMode.LIVE:
             return False
@@ -121,9 +129,7 @@ class PromotionGate:
                 return False
         except ValueError:
             return False
-        expected = hashlib.sha256(
-            f"{authorization.target.value}:{authorization.evidence_fingerprint}:{authorization.issued_at}:{authorization.expires_at}".encode()
-        ).hexdigest()
+        expected = PromotionGate.authorization_fingerprint(authorization)
         return authorization.authorization_id == expected
 
     def authorize(
