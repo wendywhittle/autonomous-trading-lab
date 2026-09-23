@@ -162,6 +162,9 @@ class ExecutionCoordinator:
         self._commit_intent_creation(request)
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
+        if self.store.is_halted():
+            reason = self.store.halt_reason() or "EXECUTION_HALTED"
+            raise RuntimeError(f"EXECUTION_HALTED:{reason}")
         self.prepare(request)
         existing = self.store.get(request.idempotency_key)
         if existing is None:
