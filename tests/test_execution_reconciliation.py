@@ -352,3 +352,163 @@ def test_execution_partial_fill_cannot_regress_to_unknown(tmp_path):
                 message="UNKNOWN",
             ),
         )
+
+
+def test_partial_fill_quantities_progress_without_double_counting(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    coordinator.prepare(request())
+
+    partial = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.PARTIALLY_FILLED,
+        message="PARTIAL_37",
+        filled_quantity=0.37,
+        remaining_quantity=0.63,
+    )
+    final_partial = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.PARTIALLY_FILLED,
+        message="PARTIAL_62",
+        filled_quantity=0.62,
+        remaining_quantity=0.38,
+    )
+    filled = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.FILLED,
+        message="FILLED",
+        filled_quantity=1.0,
+        remaining_quantity=0.0,
+    )
+
+    coordinator._commit_result("consistency-1", partial, "EXECUTION_RECONCILED")
+    coordinator._commit_result("consistency-1", final_partial, "EXECUTION_RECONCILED")
+    coordinator._commit_result("consistency-1", filled, "EXECUTION_RECONCILED")
+
+    intent = store.get("consistency-1")
+    assert intent.result == filled
+    events = ledger.read()
+    assert len(
+        [event for event in events if event.event_type == "EXECUTION_RECONCILED"]
+    ) == 3
+    assert inspect_execution_consistency(store, ledger).healthy
+
+
+def test_partial_fill_cannot_regress_quantity(tmp_path):
+    coordinator, store, _ledger = setup(tmp_path)
+    coordinator.prepare(request())
+    coordinator._commit_result(
+        "consistency-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.PARTIALLY_FILLED,
+            message="PARTIAL_37",
+            filled_quantity=0.37,
+            remaining_quantity=0.63,
+        ),
+        "EXECUTION_RECONCILED",
+    )
+
+    with pytest.raises(ValueError, match="EXECUTION_FILL_QUANTITY_REGRESSION"):
+        store.update_result(
+            "consistency-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.PARTIALLY_FILLED,
+                message="PARTIAL_20",
+                filled_quantity=0.20,
+                remaining_quantity=0.80,
+            ),
+        )
+
+
+def test_filled_result_must_account_for_entire_requested_quantity(tmp_path):
+    coordinator, store, _ledger = setup(tmp_path)
+    coordinator.prepare(request())
+
+    with pytest.raises(ValueError, match="INVALID_FILLED_QUANTITY"):
+        store.update_result(
+            "consistency-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.FILLED,
+                message="BAD_FILL",
+                filled_quantity=0.80,
+                remaining_quantity=0.20,
+            ),
+        )
+
+
+def test_partial_fill_requires_exact_quantity_total(tmp_path):
+    coordinator, store, _ledger = setup(tmp_path)
+    coordinator.prepare(request())
+
+    with pytest.raises(ValueError, match="EXECUTION_FILL_QUANTITY_TOTAL_MISMATCH"):
+        store.update_result(
+            "consistency-1",
+            BrokerOrderResult(
+                accepted=True,
+                broker_order_id="broker-1",
+                status=BrokerOrderStatus.PARTIALLY_FILLED,
+                message="BAD_TOTAL",
+                filled_quantity=0.37,
+                remaining_quantity=0.62,
+            ),
+        )
+
+
+def test_identical_partial_fill_is_idempotent(tmp_path):
+    coordinator, _store, ledger = setup(tmp_path)
+    coordinator.prepare(request())
+    partial = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.PARTIALLY_FILLED,
+        message="PARTIAL",
+        filled_quantity=0.37,
+        remaining_quantity=0.63,
+    )
+
+    coordinator._commit_result("consistency-1", partial, "EXECUTION_RECONCILED")
+    coordinator._commit_result("consistency-1", partial, "EXECUTION_RECONCILED")
+
+    assert len(
+        [event for event in ledger.read() if event.event_type == "EXECUTION_RECONCILED"]
+    ) == 1
+
+
+def test_fill_audit_quantity_corruption_forces_unhealthy_reconciliation(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    coordinator.prepare(request())
+    coordinator._commit_result(
+        "consistency-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.PARTIALLY_FILLED,
+            message="PARTIAL",
+            filled_quantity=0.37,
+            remaining_quantity=0.63,
+        ),
+        "EXECUTION_RECONCILED",
+    )
+
+    connection = sqlite3.connect(ledger.path)
+    connection.execute(
+        """
+        UPDATE events
+        SET payload = REPLACE(payload, '"filled_quantity":0.37', '"filled_quantity":0.20')
+        WHERE event_type = 'EXECUTION_RECONCILED'
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    result = inspect_execution_consistency(store, ledger)
+    assert not result.healthy
+    assert "EXECUTION_AUDIT_STATE_MISMATCH:consistency-1:filled_quantity" in result.errors
