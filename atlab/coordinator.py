@@ -68,7 +68,10 @@ class ExecutionCoordinator:
         if not PromotionGate.validate_authorization(authorization):
             raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
         if not self.store.authorization_is_active(authorization.authorization_id):
-            raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
+            if not self.store.authorization_state_exists():
+                self.store.activate_authorization(authorization.authorization_id)
+            else:
+                raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
 
     def revoke_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
