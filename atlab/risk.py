@@ -43,23 +43,7 @@ class DeterministicRiskEngine:
                 approved, reason, max_notional, *, equity, session_start_equity,
                 high_water_mark, available_cash, risk_state_fingerprint=None):
         limits_fingerprint = self.limits.fingerprint()
-        payload = {
-            "engine_version": self.ENGINE_VERSION,
-            "approved": approved, "reason": reason, "max_notional": max_notional,
-            "decision_id": decision.decision_id, "action": decision.action.value,
-            "symbol": decision.symbol,
-            "side": decision.side.value if decision.side else None,
-            "quantity": quantity, "price": price,
-            "current_position_notional": current_position_notional,
-            "equity": equity, "session_start_equity": session_start_equity,
-            "high_water_mark": high_water_mark, "available_cash": available_cash,
-            "risk_limits_fingerprint": limits_fingerprint,
-            "risk_state_fingerprint": risk_state_fingerprint,
-        }
-        fingerprint = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        return RiskDecision(
+        evidence = RiskDecision(
             approved=approved, reason=reason, max_notional=max_notional,
             decision_id=decision.decision_id, action=decision.action,
             symbol=decision.symbol, side=decision.side, quantity=quantity,
@@ -68,7 +52,9 @@ class DeterministicRiskEngine:
             high_water_mark=high_water_mark, available_cash=available_cash,
             risk_limits_fingerprint=limits_fingerprint,
             risk_state_fingerprint=risk_state_fingerprint,
-            risk_fingerprint=fingerprint,
+        )
+        return evidence.model_copy(
+            update={"risk_fingerprint": self.fingerprint_for(evidence)}
         )
 
     @classmethod
