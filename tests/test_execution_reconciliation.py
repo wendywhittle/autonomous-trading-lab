@@ -102,3 +102,50 @@ def test_execution_consistency_detects_missing_created_audit(tmp_path):
 
     assert not result.healthy
     assert "EXECUTION_INTENT_AUDIT_COUNT_MISMATCH:consistency-1:CREATED=0" in result.errors
+
+
+def test_execution_consistency_detects_orphan_audit(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    ledger.append(
+        "EXECUTION_RESULT",
+        "execution-result-orphan",
+        {
+            "idempotency_key": "orphan-key",
+            "broker_order_id": "broker-orphan",
+            "status": "FILLED",
+            "accepted": True,
+            "message": "ORPHAN",
+        },
+    )
+
+    result = inspect_execution_consistency(store, ledger)
+
+    assert not result.healthy
+    assert "EXECUTION_AUDIT_ORPHAN:orphan-key" in result.errors
+
+
+def test_execution_consistency_detects_duplicate_broker_binding(tmp_path):
+    coordinator, store, ledger = setup(tmp_path)
+    first = request()
+    second = BrokerOrderRequest(
+        idempotency_key="consistency-2",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=2,
+        price=100,
+    )
+    coordinator.prepare(first)
+    coordinator.prepare(second)
+    shared = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="shared-broker-id",
+        status=BrokerOrderStatus.ACCEPTED,
+        message="ACCEPTED",
+    )
+    coordinator._commit_result(first.idempotency_key, shared, "EXECUTION_RESULT")
+    coordinator._commit_result(second.idempotency_key, shared, "EXECUTION_RESULT")
+
+    result = inspect_execution_consistency(store, ledger)
+
+    assert not result.healthy
+    assert "EXECUTION_BROKER_ORDER_ID_DUPLICATE:shared-broker-id" in result.errors
