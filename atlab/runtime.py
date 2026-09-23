@@ -11,6 +11,7 @@ from .paper import PaperExecution
 from .portfolio import PaperPortfolio
 from .risk import DeterministicRiskEngine
 from .risk_state import RiskSessionState
+from .jev import JEVAdapter
 
 
 class TradingMode(str, Enum):
@@ -43,6 +44,7 @@ class PaperTradingEngine:
         mode: TradingMode = TradingMode.PAPER,
         portfolio_state_path: str | Path | None = None,
         risk_state_path: str | Path | None = None,
+        jev: JEVAdapter | None = None,
     ):
         if mode is not TradingMode.PAPER:
             raise ValueError("PAPER_ENGINE_REQUIRES_PAPER_MODE")
@@ -54,6 +56,7 @@ class PaperTradingEngine:
         self.portfolio = portfolio
         self.ledger = ledger
         self.quantity = quantity
+        self.jev = jev
         self.execution = PaperExecution(kill_switch=kill_switch)
         self.portfolio_state_path = (
             Path(portfolio_state_path) if portfolio_state_path else None
@@ -90,7 +93,8 @@ class PaperTradingEngine:
                 observations[: index + 1],
                 as_of=observations[index].timestamp,
             )
-            decision = make_decision(self.strategy, state)
+            proposal = make_decision(self.strategy, state)
+            decision = self.jev.evaluate(self.strategy, state, proposal) if self.jev else proposal
             decision_events = self.ledger.events_for_decision(decision.decision_id)
             event_types = {event.event_type for event in decision_events}
 
