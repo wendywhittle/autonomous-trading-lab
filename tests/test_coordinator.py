@@ -942,7 +942,7 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     finally:
         connection.close()
 
-    with pytest.raises(RuntimeError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
+    with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
         coordinator_instance.submit(req())
 
     assert broker.submissions == 0
