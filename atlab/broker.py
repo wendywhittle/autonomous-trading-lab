@@ -50,6 +50,18 @@ class BrokerOrderResult:
     message: str
 
 
+@dataclass(frozen=True)
+class BrokerRecoveryResult:
+    """A provider-side recovery result explicitly bound to the client key."""
+
+    idempotency_key: str
+    result: BrokerOrderResult
+
+    def __post_init__(self) -> None:
+        if not self.idempotency_key:
+            raise ValueError("INVALID_IDEMPOTENCY_KEY")
+
+
 class BrokerAdapter(Protocol):
     """Provider-independent execution contract."""
 
@@ -62,6 +74,10 @@ class BrokerAdapter(Protocol):
     def get_order(self, broker_order_id: str) -> BrokerOrderResult: ...
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]: ...
+
+    def reconcile_by_idempotency_keys(
+        self, idempotency_keys: list[str]
+    ) -> tuple[BrokerRecoveryResult, ...]: ...
 
 
 class IdempotentBroker:
@@ -107,6 +123,11 @@ class IdempotentBroker:
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
         return self.adapter.reconcile(broker_order_ids)
 
+    def reconcile_by_idempotency_keys(
+        self, idempotency_keys: list[str]
+    ) -> tuple[BrokerRecoveryResult, ...]:
+        return self.adapter.reconcile_by_idempotency_keys(idempotency_keys)
+
 
 class DisabledBroker:
     """Explicitly non-executing adapter used until live execution is authorized."""
@@ -134,6 +155,11 @@ class DisabledBroker:
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
         return tuple(self.get_order(order_id) for order_id in broker_order_ids)
+
+    def reconcile_by_idempotency_keys(
+        self, idempotency_keys: list[str]
+    ) -> tuple[BrokerRecoveryResult, ...]:
+        return ()
 
 
 def paper_request(order: PaperOrder) -> BrokerOrderRequest:
