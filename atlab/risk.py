@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 
 from .models import DecisionAction, JEVDecision, RiskDecision, Side
+from .risk_state import RiskStateSnapshot
 
 
 @dataclass(frozen=True)
@@ -40,7 +41,7 @@ class DeterministicRiskEngine:
 
     def _result(self, decision, price, quantity, current_position_notional,
                 approved, reason, max_notional, *, equity, session_start_equity,
-                high_water_mark, available_cash):
+                high_water_mark, available_cash, risk_state_fingerprint=None):
         limits_fingerprint = self.limits.fingerprint()
         payload = {
             "engine_version": self.ENGINE_VERSION,
@@ -53,6 +54,7 @@ class DeterministicRiskEngine:
             "equity": equity, "session_start_equity": session_start_equity,
             "high_water_mark": high_water_mark, "available_cash": available_cash,
             "risk_limits_fingerprint": limits_fingerprint,
+            "risk_state_fingerprint": risk_state_fingerprint,
         }
         fingerprint = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -65,6 +67,7 @@ class DeterministicRiskEngine:
             equity=equity, session_start_equity=session_start_equity,
             high_water_mark=high_water_mark, available_cash=available_cash,
             risk_limits_fingerprint=limits_fingerprint,
+            risk_state_fingerprint=risk_state_fingerprint,
             risk_fingerprint=fingerprint,
         )
 
@@ -73,7 +76,7 @@ class DeterministicRiskEngine:
         required = (
             decision.decision_id, decision.action, decision.symbol,
             decision.quantity, decision.price, decision.current_position_notional,
-            decision.risk_limits_fingerprint,
+            decision.risk_limits_fingerprint, decision.risk_state_fingerprint,
         )
         if any(value is None for value in required):
             raise ValueError("RISK_EVIDENCE_INCOMPLETE")
@@ -92,6 +95,7 @@ class DeterministicRiskEngine:
             "high_water_mark": decision.high_water_mark,
             "available_cash": decision.available_cash,
             "risk_limits_fingerprint": decision.risk_limits_fingerprint,
+            "risk_state_fingerprint": decision.risk_state_fingerprint,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -108,13 +112,26 @@ class DeterministicRiskEngine:
 
     def evaluate(self, decision, price, quantity, current_position_notional=0, *,
                  equity=None, session_start_equity=None, high_water_mark=None,
-                 available_cash=None):
+                 available_cash=None, risk_state: RiskStateSnapshot | None = None):
+        if risk_state is not None:
+            if (
+                risk_state.symbol != decision.symbol
+                or risk_state.current_position_notional != current_position_notional
+                or risk_state.equity != equity
+                or risk_state.session_start_equity != session_start_equity
+                or risk_state.high_water_mark != high_water_mark
+                or risk_state.available_cash != available_cash
+            ):
+                raise ValueError("RISK_STATE_INPUT_MISMATCH")
+        risk_state_fingerprint = risk_state.fingerprint() if risk_state else None
+
         def result(approved, reason, max_notional):
             return self._result(
                 decision, price, quantity, current_position_notional,
                 approved, reason, max_notional,
                 equity=equity, session_start_equity=session_start_equity,
                 high_water_mark=high_water_mark, available_cash=available_cash,
+                risk_state_fingerprint=risk_state_fingerprint,
             )
 
         if price <= 0 or quantity <= 0:
