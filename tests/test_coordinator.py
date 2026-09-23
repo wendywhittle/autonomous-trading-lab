@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 
 from atlab.models import DecisionAction, JEVDecision, Side
 from atlab.risk import DeterministicRiskEngine
+from atlab.risk_state import RiskStateSnapshot
 from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
@@ -169,6 +170,44 @@ def risk_for(request):
     )
 
 
+def risk_state():
+    return RiskStateSnapshot(
+        symbol="TEST",
+        current_position_notional=0,
+        equity=1000,
+        session_start_equity=1000,
+        high_water_mark=1000,
+        available_cash=1000,
+    )
+
+
+def risk_for_live(request):
+    snapshot = risk_state()
+    decision = JEVDecision(
+        decision_id=request.decision_id,
+        strategy_id="test-strategy",
+        strategy_version="1",
+        symbol=request.symbol,
+        action=DecisionAction.ENTER,
+        side=request.side,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state-1",
+        created_at=datetime.now(UTC),
+    )
+    return DeterministicRiskEngine().evaluate(
+        decision,
+        request.price or request.reference_price,
+        request.quantity,
+        current_position_notional=snapshot.current_position_notional,
+        equity=snapshot.equity,
+        session_start_equity=snapshot.session_start_equity,
+        high_water_mark=snapshot.high_water_mark,
+        available_cash=snapshot.available_cash,
+        risk_state=snapshot,
+    )
+
+
 def req():
     return BrokerOrderRequest(
         idempotency_key="intent-1",
@@ -176,6 +215,7 @@ def req():
         side=Side.BUY,
         quantity=1,
         price=100,
+        decision_id="decision-intent-1",
     )
 
 
@@ -184,7 +224,14 @@ def coordinator(tmp_path, broker, compliance=None, authorization=None):
     store = ExecutionIntentStore(database)
     ledger = ImmutableLedger(database)
     return (
-        ExecutionCoordinator(store, broker, ledger, authorization=authorization, compliance=compliance),
+        ExecutionCoordinator(
+            store,
+            broker,
+            ledger,
+            authorization=authorization,
+            compliance=compliance,
+            risk_state_provider=lambda request: risk_state(),
+        ),
         store,
         ledger,
     )
@@ -277,7 +324,7 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-test")
 
-    attempt = coordinator_instance.submit(req())
+    attempt = coordinator_instance.submit(req(), risk_for_live(req()))
 
     assert attempt.result.status is BrokerOrderStatus.ACCEPTED
     assert broker.submissions == 1
@@ -303,7 +350,7 @@ def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
     coordinator_instance.prepare = prepare_then_revoke
 
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
-        coordinator_instance.submit(req())
+        coordinator_instance.submit(req(), risk_for_live(req()))
 
     assert broker.submissions == 0
     assert store.get("intent-1") is not None
@@ -328,7 +375,7 @@ def test_live_broker_rejects_tampered_authorization(tmp_path):
     ))
 
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_INVALID"):
-        coordinator_instance.submit(req())
+        coordinator_instance.submit(req(), risk_for_live(req()))
 
     assert broker.submissions == 0
     assert store.get("intent-1") is None
@@ -792,7 +839,7 @@ def test_live_broker_rejects_revoked_authorization(tmp_path):
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-activate-1")
-    coordinator_instance.submit(req())
+    coordinator_instance.submit(req(), risk_for_live(req()))
     coordinator_instance.revoke_execution_authorization("operator-revoke-1")
 
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_REVOKED"):
@@ -966,7 +1013,7 @@ def test_live_execution_intent_binds_exact_authorization(tmp_path):
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     authorization = coordinator_instance.authorization
 
-    coordinator_instance.submit(req())
+    coordinator_instance.submit(req(), risk_for_live(req()))
 
     intent = store.get("intent-1")
     assert intent.authorization_id == authorization.authorization_id
@@ -979,13 +1026,13 @@ def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tm
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
-    coordinator_instance.prepare(req())
+    coordinator_instance.prepare(req(), risk_for_live(req()))
     first = store.get("intent-1")
 
     coordinator_instance = ExecutionCoordinator(store, broker, ledger, authorization=live_authorization())
 
     with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
-        coordinator_instance.prepare(req())
+        coordinator_instance.prepare(req(), risk_for_live(req()))
 
     assert store.get("intent-1").authorization_id == first.authorization_id
 
@@ -994,7 +1041,7 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
-    coordinator_instance.prepare(req())
+    coordinator_instance.prepare(req(), risk_for_live(req()))
 
     connection = store._connect()
     try:
@@ -1008,7 +1055,7 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
         connection.close()
 
     with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
-        coordinator_instance.submit(req())
+        coordinator_instance.submit(req(), risk_for_live(req()))
 
     assert broker.submissions == 0
 
@@ -1018,7 +1065,7 @@ def test_paper_execution_intent_has_no_live_authorization_binding(tmp_path):
     broker.mode = BrokerMode.PAPER
     coordinator_instance, store, _ = coordinator(tmp_path, broker)
 
-    coordinator_instance.submit(req())
+    coordinator_instance.submit(req(), risk_for_live(req()))
 
     intent = store.get("intent-1")
     assert intent.authorization_id is None
