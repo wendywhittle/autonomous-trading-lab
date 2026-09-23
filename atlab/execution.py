@@ -51,7 +51,63 @@ class ExecutionIntentStore:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_halt (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active INTEGER NOT NULL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
         return connection
+
+    def halt(self, reason: str) -> None:
+        if not reason:
+            raise ValueError("EXECUTION_HALT_REASON_REQUIRED")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO execution_halt(id, active, reason)
+                VALUES (1, 1, ?)
+                ON CONFLICT(id) DO UPDATE SET active = 1, reason = excluded.reason
+                """,
+                (reason,),
+            )
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+
+    def is_halted(self) -> bool:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT active FROM execution_halt WHERE id = 1"
+            ).fetchone()
+            return bool(row and row[0])
+        finally:
+            connection.close()
+
+    def halt_reason(self) -> str | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT reason FROM execution_halt WHERE id = 1 AND active = 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            connection.close()
+
+    def clear_halt(self) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE execution_halt SET active = 0 WHERE id = 1")
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
 
     @staticmethod
     def _encode_request(request: BrokerOrderRequest) -> str:
