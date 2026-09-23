@@ -50,6 +50,15 @@ class DeterministicRiskEngine:
                 return RiskDecision(approved=False, reason="INVALID_EQUITY", max_notional=0)
             if high_water_mark - equity > self.limits.max_drawdown:
                 return RiskDecision(approved=False, reason="DRAWDOWN_LIMIT", max_notional=0)
+        expected_side = {
+            DecisionAction.HOLD: None,
+            DecisionAction.ENTER: Side.BUY,
+            DecisionAction.EXIT: Side.SELL,
+        }[decision.action]
+        if decision.side is not None and decision.side is not expected_side:
+            return RiskDecision(approved=False, reason="INVALID_DECISION_SIDE", max_notional=0)
+        if decision.action is not DecisionAction.HOLD and decision.side is None:
+            return RiskDecision(approved=False, reason="INVALID_DECISION_SIDE", max_notional=0)
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(approved=False, reason="HOLD_DECISION", max_notional=0)
 
