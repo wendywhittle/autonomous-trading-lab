@@ -301,8 +301,8 @@ def test_execution_status_transitions_are_monotonic(tmp_path):
         broker_order_id="broker-1",
         status=BrokerOrderStatus.PARTIALLY_FILLED,
         message="PARTIAL",
-        filled_quantity=37,
-        remaining_quantity=63,
+        filled_quantity=0.37,
+        remaining_quantity=0.63,
     )
     filled = BrokerOrderResult(
         accepted=True,
