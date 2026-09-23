@@ -247,7 +247,8 @@ def test_coordinator_result_and_audit_commit_atomically(tmp_path):
     intent = store.get("intent-1")
     assert intent is not None
     assert intent.result is None
-    assert ledger.read() == []
+    events = ledger.read()
+    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
 
     ledger._append_in_connection = original
 
