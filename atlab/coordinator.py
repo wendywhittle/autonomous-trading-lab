@@ -8,6 +8,7 @@ from enum import Enum
 
 from .broker import (
     BrokerAdapter,
+    BrokerMode,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatus,
@@ -19,6 +20,7 @@ from .execution_reconciliation import (
     reconciliation_halt_reason,
 )
 from .ledger import ImmutableLedger
+from .promotion import ExecutionAuthorization, PromotionMode
 
 
 class IntentStatus(str, Enum):
@@ -43,12 +45,23 @@ class ExecutionCoordinator:
         store: ExecutionIntentStore,
         broker: BrokerAdapter,
         ledger: ImmutableLedger,
+        authorization: ExecutionAuthorization | None = None,
     ):
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
         self.store = store
         self.broker = broker
         self.ledger = ledger
+        self.authorization = authorization
+
+    def _require_execution_authorization(self) -> None:
+        if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
+            return
+        authorization = self.authorization
+        if authorization is None or authorization.target is not PromotionMode.LIVE:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+        if not authorization.authorization_id or not authorization.evidence_fingerprint:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
 
     def _transaction(self) -> sqlite3.Connection:
         connection = self.store._connect()
@@ -270,6 +283,7 @@ class ExecutionCoordinator:
         self._commit_intent_creation(request)
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
+        self._require_execution_authorization()
         self.enforce_reconciliation_safety()
         if self.store.is_halted():
             reason = self.store.halt_reason() or "EXECUTION_HALTED"
