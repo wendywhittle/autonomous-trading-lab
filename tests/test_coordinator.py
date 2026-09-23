@@ -375,7 +375,7 @@ def test_reconcile_unbound_requested_provider_order_durably_halts(tmp_path):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="EXECUTION_RECONCILE_UNREQUESTED_ORDER"):
+    with pytest.raises(RuntimeError, match="EXECUTION_RECONCILE_UNBOUND_ORDER"):
         coordinator_instance.reconcile(["broker-unbound"])
 
     assert store.is_halted()
