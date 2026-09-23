@@ -51,6 +51,14 @@ class BrokerOrderResult:
 
 
 @dataclass(frozen=True)
+class BrokerDiscoveredOrder:
+    """Provider-side order discovered during reconciliation."""
+
+    idempotency_key: str | None
+    result: BrokerOrderResult
+
+
+@dataclass(frozen=True)
 class BrokerRecoveryResult:
     """A provider-side recovery result explicitly bound to the client key."""
 
@@ -74,6 +82,8 @@ class BrokerAdapter(Protocol):
     def get_order(self, broker_order_id: str) -> BrokerOrderResult: ...
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]: ...
+
+    def discover_open_orders(self) -> tuple[BrokerDiscoveredOrder, ...]: ...
 
     def reconcile_by_idempotency_keys(
         self, idempotency_keys: list[str]
@@ -123,6 +133,9 @@ class IdempotentBroker:
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
         return self.adapter.reconcile(broker_order_ids)
 
+    def discover_open_orders(self) -> tuple[BrokerDiscoveredOrder, ...]:
+        return self.adapter.discover_open_orders()
+
     def reconcile_by_idempotency_keys(
         self, idempotency_keys: list[str]
     ) -> tuple[BrokerRecoveryResult, ...]:
@@ -155,6 +168,9 @@ class DisabledBroker:
 
     def reconcile(self, broker_order_ids: list[str]) -> tuple[BrokerOrderResult, ...]:
         return tuple(self.get_order(order_id) for order_id in broker_order_ids)
+
+    def discover_open_orders(self) -> tuple[BrokerDiscoveredOrder, ...]:
+        return ()
 
     def reconcile_by_idempotency_keys(
         self, idempotency_keys: list[str]
