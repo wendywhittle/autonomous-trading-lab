@@ -54,7 +54,7 @@ class ExecutionCoordinator:
         self.store = store
         self._broker = broker
         self.ledger = ledger
-        self.authorization = authorization
+        self._authorization = authorization
         self._compliance = compliance or ComplianceEngine(
             CompliancePolicy(policy_id="default", version="1")
         )
@@ -64,13 +64,17 @@ class ExecutionCoordinator:
         return self._broker
 
     @property
+    def authorization(self) -> ExecutionAuthorization | None:
+        return self._authorization
+
+    @property
     def compliance(self) -> ComplianceEngine:
         return self._compliance
 
     def _require_execution_authorization(self) -> ExecutionAuthorization | None:
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
             return None
-        authorization = self.authorization
+        authorization = self._authorization
         if authorization is None or authorization.target is not PromotionMode.LIVE:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
         if not PromotionGate.validate_authorization(authorization):
@@ -82,7 +86,7 @@ class ExecutionCoordinator:
     def activate_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
             raise ValueError("EXECUTION_AUTHORIZATION_ACTIVATE_REFERENCE_REQUIRED")
-        authorization = self.authorization
+        authorization = self._authorization
         if authorization is None or authorization.target is not PromotionMode.LIVE:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
         if not PromotionGate.validate_authorization(authorization):
@@ -114,7 +118,7 @@ class ExecutionCoordinator:
     def revoke_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
             raise ValueError("EXECUTION_AUTHORIZATION_REVOKE_REFERENCE_REQUIRED")
-        authorization = self.authorization
+        authorization = self._authorization
         if authorization is None:
             return
         connection = self._transaction()
