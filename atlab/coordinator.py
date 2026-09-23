@@ -141,13 +141,13 @@ class ExecutionCoordinator:
             )
             connection.execute("COMMIT")
         except Exception:
-                try:
-                    connection.execute("ROLLBACK")
-                finally:
-                    connection.close()
-                raise
-            else:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
                 connection.close()
+            raise
+        else:
+            connection.close()
 
     def _transaction(self) -> sqlite3.Connection:
         connection = self.store._connect()
