@@ -60,7 +60,62 @@ class ExecutionIntentStore:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_authorization_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active_authorization_id TEXT
+            )
+            """
+        )
         return connection
+
+    def activate_authorization(self, authorization_id: str) -> None:
+        if not authorization_id:
+            raise ValueError("EXECUTION_AUTHORIZATION_ID_REQUIRED")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO execution_authorization_state(id, active_authorization_id)
+                VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET active_authorization_id = excluded.active_authorization_id
+                """,
+                (authorization_id,),
+            )
+            connection.execute("COMMIT")
+        finally:
+            connection.close()
+
+    def authorization_is_active(self, authorization_id: str) -> bool:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT active_authorization_id FROM execution_authorization_state WHERE id = 1"
+            ).fetchone()
+            return bool(row and row[0] == authorization_id)
+        finally:
+            connection.close()
+
+    def revoke_authorization(self, authorization_id: str) -> bool:
+        if not authorization_id:
+            raise ValueError("EXECUTION_AUTHORIZATION_ID_REQUIRED")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT active_authorization_id FROM execution_authorization_state WHERE id = 1"
+            ).fetchone()
+            active = bool(row and row[0] == authorization_id)
+            if active:
+                connection.execute(
+                    "UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1"
+                )
+            connection.execute("COMMIT")
+            return active
+        finally:
+            connection.close()
 
     def halt(self, reason: str) -> None:
         if not reason:
