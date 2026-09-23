@@ -208,6 +208,7 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker)
     coordinator_instance.authorization = live_authorization()
+    coordinator_instance.activate_execution_authorization("operator-test")
 
     attempt = coordinator_instance.submit(req())
 
@@ -225,6 +226,7 @@ def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker)
     coordinator_instance.authorization = live_authorization()
+    coordinator_instance.activate_execution_authorization("operator-race-test")
 
     original_prepare = coordinator_instance.prepare
 
@@ -725,6 +727,7 @@ def test_live_broker_rejects_revoked_authorization(tmp_path):
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker)
     coordinator_instance.authorization = live_authorization()
+    coordinator_instance.activate_execution_authorization("operator-activate-1")
     coordinator_instance.submit(req())
     coordinator_instance.revoke_execution_authorization("operator-revoke-1")
 
@@ -749,6 +752,7 @@ def test_new_live_authorization_replaces_previous_active_session(tmp_path):
     broker.mode = BrokerMode.LIVE
     first, store, _ = coordinator(tmp_path, broker)
     first.authorization = live_authorization()
+    first.activate_execution_authorization("operator-first")
     first.submit(req())
     first_id = first.authorization.authorization_id
 
