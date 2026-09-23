@@ -105,9 +105,23 @@ class ExecutionCoordinator:
             connection.execute("COMMIT")
         except ValueError as exc:
             if str(exc) == "LEDGER_EVENT_ID_EXISTS":
+                expected = {
+                    "idempotency_key": idempotency_key,
+                    "broker_order_id": result.broker_order_id,
+                    "status": result.status.value,
+                    "accepted": result.accepted,
+                    "message": result.message,
+                }
+                existing_events = [
+                    event for event in self.ledger.read()
+                    if event.event_id
+                    == self._event_id(event_type, idempotency_key)
+                ]
                 connection.execute("ROLLBACK")
                 connection.close()
-                return
+                if existing_events and existing_events[0].payload == expected:
+                    return
+                raise ValueError("EXECUTION_AUDIT_EVENT_CONFLICT") from exc
             try:
                 connection.execute("ROLLBACK")
             finally:
