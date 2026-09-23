@@ -1,3 +1,7 @@
+import concurrent.futures
+
+import pytest
+
 from atlab.broker import (
     BrokerMode,
     BrokerOrderRequest,
@@ -82,8 +86,6 @@ def coordinator(tmp_path, broker):
 def test_coordinator_rejects_split_execution_and_ledger_databases(tmp_path):
     store = ExecutionIntentStore(tmp_path / "intents.sqlite3")
     ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
-
-    import pytest
 
     with pytest.raises(ValueError, match="EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE"):
         ExecutionCoordinator(store, DisabledBroker(), ledger)
@@ -200,3 +202,65 @@ def test_coordinator_does_not_duplicate_intent_audit_on_retry(tmp_path):
     events = ledger.read()
     assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
     assert store.pending_keys() == ("intent-1",)
+
+
+
+def test_coordinator_prepare_rolls_back_intent_when_audit_fails(tmp_path, monkeypatch):
+    coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("AUDIT_WRITE_FAILED")
+
+    monkeypatch.setattr(ledger, "_append_in_connection", fail_audit)
+
+    with pytest.raises(RuntimeError, match="AUDIT_WRITE_FAILED"):
+        coordinator_instance.prepare(req())
+
+    assert store.get("intent-1") is None
+    assert ledger.read() == []
+
+
+def test_coordinator_result_and_audit_commit_atomically(tmp_path):
+    broker = AcceptedBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.prepare(req())
+
+    original = ledger._append_in_connection
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("AUDIT_WRITE_FAILED")
+
+    import types
+
+    ledger._append_in_connection = types.MethodType(
+        lambda self, *args, **kwargs: fail_audit(*args, **kwargs),
+        ledger,
+    )
+
+    result = broker.submit(req())
+
+    with pytest.raises(RuntimeError, match="AUDIT_WRITE_FAILED"):
+        coordinator_instance._commit_result(
+            req().idempotency_key, result, "EXECUTION_RESULT"
+        )
+
+    intent = store.get("intent-1")
+    assert intent is not None
+    assert intent.result is None
+    assert ledger.read() == []
+
+    ledger._append_in_connection = original
+
+
+def test_concurrent_prepare_same_key_creates_one_intent_and_one_audit(tmp_path):
+    coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
+
+    def prepare():
+        coordinator_instance.prepare(req())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: prepare(), range(8)))
+
+    assert store.get("intent-1").request == req()
+    events = ledger.read()
+    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
