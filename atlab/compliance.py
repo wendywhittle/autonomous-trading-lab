@@ -40,10 +40,21 @@ class ComplianceDecision:
 
 
 class ComplianceEngine:
-    """Fail-closed deterministic pre-trade compliance boundary."""
+    """Fail-closed deterministic pre-trade compliance boundary.
+
+    The engine is immutable after construction. A policy change therefore
+    requires constructing a new engine explicitly; an in-flight decision
+    cannot be silently retargeted by mutating the existing control plane.
+    """
 
     def __init__(self, policy: CompliancePolicy):
-        self.policy = policy
+        object.__setattr__(self, "policy", policy)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_sealed", False):
+            raise AttributeError("COMPLIANCE_ENGINE_IMMUTABLE")
+        object.__setattr__(self, name, value)
 
     def _fingerprint(self) -> str:
         p = self.policy
