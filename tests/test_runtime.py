@@ -76,6 +76,56 @@ def test_paper_engine_is_repeatable(tmp_path):
     ]
 
 
+class CountingJEV:
+    def __init__(self):
+        self.calls = 0
+
+    def evaluate(self, strategy, state, proposal):
+        self.calls += 1
+        return proposal.model_copy(
+            update={
+                "decision_id": f"jev-eval-{self.calls}",
+                "confidence": 0.9,
+                "rationale": f"evaluation-{self.calls}",
+            }
+        )
+
+
+def test_paper_engine_persists_jev_evaluation_across_restart(tmp_path):
+    observations = [obs(100, 1), obs(101, 2), obs(102, 3)]
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    jev = CountingJEV()
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+        jev=jev,
+        portfolio_state_path=tmp_path / "portfolio.json",
+        risk_state_path=tmp_path / "risk.json",
+    )
+
+    first = engine.run("TEST")
+    assert len(first) == 2
+    assert jev.calls == 2
+    assert len([e for e in ledger.read() if e.event_type == "JEV_EVALUATION"]) == 2
+
+    restarted_jev = CountingJEV()
+    restarted = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(0),
+        ledger,
+        jev=restarted_jev,
+        portfolio_state_path=tmp_path / "portfolio.json",
+        risk_state_path=tmp_path / "risk.json",
+    )
+    assert restarted.run("TEST") == ()
+    assert restarted_jev.calls == 0
+
+
 def test_paper_engine_rejects_non_paper_modes(tmp_path):
     with pytest.raises(ValueError, match="PAPER_ENGINE_REQUIRES_PAPER_MODE"):
         PaperTradingEngine(
