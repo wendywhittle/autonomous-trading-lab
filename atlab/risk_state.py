@@ -2,7 +2,37 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class RiskStateSnapshot:
+    symbol: str
+    current_position_notional: float
+    equity: float
+    session_start_equity: float
+    high_water_mark: float
+    available_cash: float
+
+    def __post_init__(self) -> None:
+        import math
+        values = (self.current_position_notional, self.equity, self.session_start_equity, self.high_water_mark, self.available_cash)
+        if not self.symbol or any(not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError("INVALID_RISK_STATE_SNAPSHOT")
+        if self.high_water_mark < self.equity:
+            raise ValueError("INVALID_RISK_STATE_SNAPSHOT")
+
+    def fingerprint(self) -> str:
+        payload = {
+            "symbol": self.symbol,
+            "current_position_notional": self.current_position_notional,
+            "equity": self.equity,
+            "session_start_equity": self.session_start_equity,
+            "high_water_mark": self.high_water_mark,
+            "available_cash": self.available_cash,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
