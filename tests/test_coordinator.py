@@ -184,6 +184,13 @@ def test_coordinator_compliance_engine_cannot_be_replaced_after_construction(tmp
         coordinator_instance.compliance = replacement
 
 
+def test_coordinator_broker_cannot_be_replaced_after_construction(tmp_path):
+    coordinator_instance, _, _ = coordinator(tmp_path, DisabledBroker())
+
+    with pytest.raises(AttributeError):
+        coordinator_instance.broker = AcceptedBroker()
+
+
 def test_coordinator_uses_constructor_bound_compliance_policy(tmp_path):
     compliance = ComplianceEngine(
         CompliancePolicy(
