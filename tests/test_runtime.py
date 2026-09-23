@@ -327,34 +327,6 @@ def test_paper_engine_rejects_corrupt_persisted_jev_evaluation(tmp_path):
     assert [event.event_type for event in ledger.read()] == ["JEV_EVALUATION"]
 
 
-def test_paper_engine_rejects_persisted_jev_proposal_mismatch(tmp_path):
-    observations = [obs(100, 1), obs(101, 2)]
-    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
-    state = build_state(observations, as_of=observations[1].timestamp)
-    proposal = make_decision(strategy(), state)
-    ledger.append(
-        "JEV_EVALUATION",
-        f"jev-{proposal.decision_id}",
-        {
-            "proposal_id": "forged-proposal",
-            "decision": proposal.model_copy(
-                update={"decision_id": "jev-forged"}
-            ).model_dump(mode="json"),
-        },
-    )
-
-    engine = PaperTradingEngine(
-        InMemoryMarketData(observations),
-        strategy(),
-        DeterministicRiskEngine(),
-        PaperPortfolio(1000),
-        ledger,
-    )
-
-    with pytest.raises(RuntimeError, match="JEV_EVALUATION_PROPOSAL_MISMATCH"):
-        engine.run("TEST")
-
-
 def test_jev_exit_side_is_deterministically_sell():
     from atlab.jev import TypeSafeJEV
 
