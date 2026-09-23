@@ -28,9 +28,9 @@ class ExecutionIntent:
 class ExecutionIntentStore:
     """SQLite-backed durable execution intent state.
 
-    Execution intent state lives in the same database file as the immutable
-    audit ledger when used by ExecutionCoordinator. This removes the prior
-    JSON-versus-SQLite split-brain between execution state and audit history.
+    Execution intent state shares the SQLite database file with the immutable
+    audit ledger. Coordinator-level transactions can therefore commit or
+    roll back current execution state and its audit event together.
     """
 
     def __init__(self, path: str | Path):
@@ -117,44 +117,78 @@ class ExecutionIntentStore:
             result=self._decode_result(row[3]),
         )
 
+    def _get_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        idempotency_key: str,
+    ) -> ExecutionIntent | None:
+        row = connection.execute(
+            "SELECT idempotency_key, request, status, result "
+            "FROM execution_intents WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        return self._row_to_intent(row) if row is not None else None
+
+    def _record_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        request: BrokerOrderRequest,
+    ) -> tuple[ExecutionIntent, bool]:
+        existing = self._get_in_connection(connection, request.idempotency_key)
+        encoded_request = self._encode_request(request)
+        if existing is not None:
+            if self._encode_request(existing.request) != encoded_request:
+                raise ValueError("EXECUTION_INTENT_CONFLICT")
+            return existing, False
+
+        connection.execute(
+            """
+            INSERT INTO execution_intents(idempotency_key, request, status, result)
+            VALUES (?, ?, ?, NULL)
+            """,
+            (
+                request.idempotency_key,
+                encoded_request,
+                BrokerOrderStatus.UNKNOWN.value,
+            ),
+        )
+        created = self._get_in_connection(connection, request.idempotency_key)
+        if created is None:
+            raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
+        return created, True
+
+    def _update_result_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        idempotency_key: str,
+        result: BrokerOrderResult,
+    ) -> ExecutionIntent:
+        if self._get_in_connection(connection, idempotency_key) is None:
+            raise KeyError("EXECUTION_INTENT_NOT_FOUND")
+        connection.execute(
+            """
+            UPDATE execution_intents
+            SET status = ?, result = ?
+            WHERE idempotency_key = ?
+            """,
+            (
+                result.status.value,
+                self._encode_result(result),
+                idempotency_key,
+            ),
+        )
+        updated = self._get_in_connection(connection, idempotency_key)
+        if updated is None:
+            raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
+        return updated
+
     def record(self, request: BrokerOrderRequest) -> ExecutionIntent:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT idempotency_key, request, status, result "
-                "FROM execution_intents WHERE idempotency_key = ?",
-                (request.idempotency_key,),
-            ).fetchone()
-            encoded_request = self._encode_request(request)
-            if existing is not None:
-                if existing[1] != encoded_request:
-                    connection.execute("ROLLBACK")
-                    raise ValueError("EXECUTION_INTENT_CONFLICT")
-                connection.execute("COMMIT")
-                return self._row_to_intent(existing)
-
-            connection.execute(
-                """
-                INSERT INTO execution_intents(idempotency_key, request, status, result)
-                VALUES (?, ?, ?, NULL)
-                """,
-                (
-                    request.idempotency_key,
-                    encoded_request,
-                    BrokerOrderStatus.UNKNOWN.value,
-                ),
-            )
-            row = connection.execute(
-                "SELECT idempotency_key, request, status, result "
-                "FROM execution_intents WHERE idempotency_key = ?",
-                (request.idempotency_key,),
-            ).fetchone()
+            intent, _ = self._record_in_connection(connection, request)
             connection.execute("COMMIT")
-            return self._row_to_intent(row)
-        except sqlite3.IntegrityError as exc:
-            connection.execute("ROLLBACK")
-            raise ValueError("EXECUTION_INTENT_CONFLICT") from exc
+            return intent
         except Exception:
             try:
                 connection.execute("ROLLBACK")
@@ -172,34 +206,11 @@ class ExecutionIntentStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT idempotency_key, request, status, result "
-                "FROM execution_intents WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if row is None:
-                connection.execute("ROLLBACK")
-                raise KeyError("EXECUTION_INTENT_NOT_FOUND")
-
-            connection.execute(
-                """
-                UPDATE execution_intents
-                SET status = ?, result = ?
-                WHERE idempotency_key = ?
-                """,
-                (
-                    result.status.value,
-                    self._encode_result(result),
-                    idempotency_key,
-                ),
+            updated = self._update_result_in_connection(
+                connection, idempotency_key, result
             )
-            updated = connection.execute(
-                "SELECT idempotency_key, request, status, result "
-                "FROM execution_intents WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
             connection.execute("COMMIT")
-            return self._row_to_intent(updated)
+            return updated
         except Exception:
             try:
                 connection.execute("ROLLBACK")
@@ -212,12 +223,7 @@ class ExecutionIntentStore:
     def get(self, idempotency_key: str) -> ExecutionIntent | None:
         connection = self._connect()
         try:
-            row = connection.execute(
-                "SELECT idempotency_key, request, status, result "
-                "FROM execution_intents WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            return self._row_to_intent(row) if row is not None else None
+            return self._get_in_connection(connection, idempotency_key)
         finally:
             connection.close()
 
