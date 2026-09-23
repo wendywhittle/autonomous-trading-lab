@@ -88,6 +88,16 @@ class ExecutionIntentStore:
         finally:
             connection.close()
 
+    def authorization_state_exists(self) -> bool:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM execution_authorization_state WHERE id = 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
     def authorization_is_active(self, authorization_id: str) -> bool:
         connection = self._connect()
         try:
