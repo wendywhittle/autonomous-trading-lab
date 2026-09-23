@@ -330,6 +330,7 @@ def test_live_broker_accepts_only_explicit_live_authorization(tmp_path):
     assert broker.submissions == 1
     assert store.get("intent-1").result == attempt.result
     assert [event.event_type for event in ledger.read()] == [
+        "EXECUTION_AUTHORIZATION_ACTIVATED",
         "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_RESULT",
@@ -890,6 +891,7 @@ def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    first.activate_execution_authorization("operator-first")
     first.submit(req(), risk_for_live(req()))
     first.revoke_execution_authorization("operator-revoke")
 
@@ -1022,6 +1024,7 @@ def test_live_execution_intent_binds_exact_authorization(tmp_path):
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     authorization = coordinator_instance.authorization
+    coordinator_instance.activate_execution_authorization("operator-bind")
 
     coordinator_instance.submit(req(), risk_for_live(req()))
 
@@ -1036,6 +1039,7 @@ def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tm
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    coordinator_instance.activate_execution_authorization("operator-bind-conflict")
     coordinator_instance.prepare(req(), risk_for_live(req()))
     first = store.get("intent-1")
 
@@ -1051,6 +1055,7 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    coordinator_instance.activate_execution_authorization("operator-tamper")
     coordinator_instance.prepare(req(), risk_for_live(req()))
 
     connection = store._connect()
