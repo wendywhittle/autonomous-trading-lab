@@ -89,7 +89,7 @@ def test_coordinator_persists_intent_before_submission(tmp_path):
 
 
 def test_coordinator_marks_provider_failure_unknown_and_audits(tmp_path):
-    coordinator_instance, _, ledger = coordinator(tmp_path, FailingBroker())
+    coordinator_instance, store, ledger = coordinator(tmp_path, FailingBroker())
 
     attempt = coordinator_instance.submit(req())
 
@@ -160,7 +160,7 @@ def test_coordinator_does_not_resubmit_unknown_result(tmp_path):
 
 
 def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
-    coordinator_instance, _, ledger = coordinator(tmp_path, AcceptedBroker())
+    coordinator_instance, store, ledger = coordinator(tmp_path, AcceptedBroker())
 
     attempt = coordinator_instance.submit(req())
     assert attempt.status is IntentStatus.SUBMITTED
@@ -181,7 +181,7 @@ def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
 
 
 def test_coordinator_does_not_duplicate_intent_audit_on_retry(tmp_path):
-    coordinator_instance, _, ledger = coordinator(tmp_path, DisabledBroker())
+    coordinator_instance, store, ledger = coordinator(tmp_path, DisabledBroker())
 
     coordinator_instance.prepare(req())
     coordinator_instance.prepare(req())
