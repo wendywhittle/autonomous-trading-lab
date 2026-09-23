@@ -22,6 +22,8 @@ class RiskStateSnapshot:
             raise ValueError("INVALID_RISK_STATE_SNAPSHOT")
         if self.high_water_mark < self.equity:
             raise ValueError("INVALID_RISK_STATE_SNAPSHOT")
+        for field in ("current_position_notional", "equity", "session_start_equity", "high_water_mark", "available_cash"):
+            object.__setattr__(self, field, float(getattr(self, field)))
 
     def fingerprint(self) -> str:
         payload = {
