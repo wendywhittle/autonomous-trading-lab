@@ -79,3 +79,35 @@ def test_live_authorization_rejects_tampering():
         evidence_fingerprint="tampered",
     )
     assert not PromotionGate.validate_authorization(tampered)
+
+
+
+def test_live_authorization_rejects_expired_artifact():
+    from datetime import datetime, timedelta, timezone
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    issued = datetime.now(timezone.utc) - timedelta(minutes=10)
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE, ttl_seconds=60, now=issued)
+    assert not PromotionGate.validate_authorization(authorization)
+
+
+def test_live_authorization_requires_freshness_fields():
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE)
+    tampered = type(authorization)(
+        authorization_id=authorization.authorization_id,
+        target=authorization.target,
+        evidence_fingerprint=authorization.evidence_fingerprint,
+    )
+    assert not PromotionGate.validate_authorization(tampered)
