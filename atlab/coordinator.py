@@ -138,25 +138,89 @@ class ExecutionCoordinator:
     def _event_id(event_type: str, idempotency_key: str) -> str:
         return f"{event_type.lower()}-{idempotency_key}"
 
-    def _commit_intent_creation(self, request: BrokerOrderRequest) -> None:
+    @staticmethod
+    def _compliance_event_id(
+        request: BrokerOrderRequest, decision
+    ) -> str:
+        payload = {
+            "idempotency_key": request.idempotency_key,
+            "symbol": request.symbol,
+            "side": request.side.value,
+            "quantity": request.quantity,
+            "price": request.price,
+            "action": decision.action.value,
+            "reason": decision.reason,
+            "policy_id": decision.policy_id,
+            "policy_version": decision.policy_version,
+            "policy_fingerprint": decision.policy_fingerprint,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:16]
+        return f"compliance-decision-{request.idempotency_key}-{digest}"
+
+    @staticmethod
+    def _compliance_payload(request: BrokerOrderRequest, decision) -> dict:
+        return {
+            "idempotency_key": request.idempotency_key,
+            "symbol": request.symbol,
+            "side": request.side.value,
+            "quantity": request.quantity,
+            "price": request.price,
+            "action": decision.action.value,
+            "reason": decision.reason,
+            "policy_id": decision.policy_id,
+            "policy_version": decision.policy_version,
+            "policy_fingerprint": decision.policy_fingerprint,
+        }
+
+    def _append_compliance_in_connection(
+        self, connection: sqlite3.Connection, request: BrokerOrderRequest, decision
+    ) -> None:
+        payload = self._compliance_payload(request, decision)
+        event_id = self._compliance_event_id(request, decision)
+        try:
+            self.ledger._append_in_connection(
+                connection,
+                "COMPLIANCE_DECISION",
+                event_id,
+                payload,
+            )
+        except ValueError as exc:
+            if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                raise
+            row = connection.execute(
+                "SELECT event_type, payload FROM events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None or row[0] != "COMPLIANCE_DECISION":
+                raise ValueError("COMPLIANCE_AUDIT_EVENT_CONFLICT") from exc
+            if json.loads(row[1]) != payload:
+                raise ValueError("COMPLIANCE_AUDIT_EVENT_CONFLICT") from exc
+
+    def _commit_compliance_and_intent(
+        self, request: BrokerOrderRequest, decision
+    ) -> None:
         connection = self._transaction()
         try:
-            _, created = self.store._record_in_connection(connection, request)
-            if created:
-                self.ledger._append_in_connection(
-                    connection,
-                    "EXECUTION_INTENT_CREATED",
-                    self._event_id(
-                        "EXECUTION_INTENT_CREATED", request.idempotency_key
-                    ),
-                    {
-                        "idempotency_key": request.idempotency_key,
-                        "symbol": request.symbol,
-                        "side": request.side.value,
-                        "quantity": request.quantity,
-                        "price": request.price,
-                    },
-                )
+            self._append_compliance_in_connection(connection, request, decision)
+            if decision.action is ComplianceAction.ALLOW:
+                _, created = self.store._record_in_connection(connection, request)
+                if created:
+                    self.ledger._append_in_connection(
+                        connection,
+                        "EXECUTION_INTENT_CREATED",
+                        self._event_id(
+                            "EXECUTION_INTENT_CREATED", request.idempotency_key
+                        ),
+                        {
+                            "idempotency_key": request.idempotency_key,
+                            "symbol": request.symbol,
+                            "side": request.side.value,
+                            "quantity": request.quantity,
+                            "price": request.price,
+                        },
+                    )
             connection.execute("COMMIT")
         except Exception:
             try:
@@ -346,10 +410,14 @@ class ExecutionCoordinator:
             connection.close()
 
     def prepare(self, request: BrokerOrderRequest) -> None:
-        decision = self.compliance.evaluate(request, getattr(self.broker, "mode", BrokerMode.DISABLED))
+        decision = self.compliance.evaluate(
+            request, getattr(self.broker, "mode", BrokerMode.DISABLED)
+        )
+        self._commit_compliance_and_intent(request, decision)
         if decision.action is not ComplianceAction.ALLOW:
-            raise RuntimeError(f"{decision.reason}:{decision.policy_id}:{decision.policy_version}")
-        self._commit_intent_creation(request)
+            raise RuntimeError(
+                f"{decision.reason}:{decision.policy_id}:{decision.policy_version}"
+            )
 
     def submit(self, request: BrokerOrderRequest) -> ExecutionAttempt:
         self._require_execution_authorization()
