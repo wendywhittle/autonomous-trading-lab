@@ -57,9 +57,9 @@ class ExecutionCoordinator:
         self.authorization = authorization
         self.compliance = compliance or ComplianceEngine(CompliancePolicy(policy_id="default", version="1"))
 
-    def _require_execution_authorization(self) -> None:
+    def _require_execution_authorization(self) -> ExecutionAuthorization | None:
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
-            return
+            return None
         authorization = self.authorization
         if authorization is None or authorization.target is not PromotionMode.LIVE:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
@@ -70,6 +70,7 @@ class ExecutionCoordinator:
                 self.store.activate_authorization(authorization.authorization_id)
             else:
                 raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
+        return authorization
 
     def activate_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
@@ -207,13 +208,28 @@ class ExecutionCoordinator:
                 raise ValueError("COMPLIANCE_AUDIT_EVENT_CONFLICT") from exc
 
     def _commit_compliance_and_intent(
-        self, request: BrokerOrderRequest, decision
+        self,
+        request: BrokerOrderRequest,
+        decision,
+        authorization: ExecutionAuthorization | None = None,
     ) -> None:
         connection = self._transaction()
         try:
             self._append_compliance_in_connection(connection, request, decision)
             if decision.action is ComplianceAction.ALLOW:
-                _, created = self.store._record_in_connection(connection, request)
+                authorization_binding = None
+                if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
+                    if authorization is None:
+                        raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+                    authorization_binding = (
+                        authorization.authorization_id,
+                        PromotionGate.authorization_fingerprint(authorization),
+                        authorization.issued_at,
+                        authorization.expires_at,
+                    )
+                _, created = self.store._record_in_connection(
+                    connection, request, authorization_binding
+                )
                 if created:
                     self.ledger._append_in_connection(
                         connection,
@@ -418,10 +434,11 @@ class ExecutionCoordinator:
             connection.close()
 
     def prepare(self, request: BrokerOrderRequest) -> None:
+        authorization = self._require_execution_authorization()
         decision = self.compliance.evaluate(
             request, getattr(self.broker, "mode", BrokerMode.DISABLED)
         )
-        self._commit_compliance_and_intent(request, decision)
+        self._commit_compliance_and_intent(request, decision, authorization)
         if decision.action is not ComplianceAction.ALLOW:
             raise RuntimeError(
                 f"{decision.reason}:{decision.policy_id}:{decision.policy_version}"
@@ -446,9 +463,25 @@ class ExecutionCoordinator:
             )
 
         # Re-check LIVE authorization after all deterministic preparation and
-        # immediately before the external side effect. This closes the local
-        # check-then-act window for expiry/revocation that occurs during prepare().
-        self._require_execution_authorization()
+        # immediately before the external side effect.
+        authorization = self._require_execution_authorization()
+        if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
+            if authorization is None:
+                raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+            expected_binding = (
+                authorization.authorization_id,
+                PromotionGate.authorization_fingerprint(authorization),
+                authorization.issued_at,
+                authorization.expires_at,
+            )
+            actual_binding = (
+                existing.authorization_id,
+                existing.authorization_fingerprint,
+                existing.authorization_issued_at,
+                existing.authorization_expires_at,
+            )
+            if actual_binding != expected_binding:
+                raise RuntimeError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
 
         try:
             result = self.broker.submit(request)
