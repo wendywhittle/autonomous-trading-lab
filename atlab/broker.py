@@ -68,9 +68,12 @@ class BrokerOrderResult:
                 raise ValueError("PARTIAL_FILL_QUANTITY_REQUIRED")
             if self.filled_quantity <= 0 or self.remaining_quantity <= 0:
                 raise ValueError("INVALID_PARTIAL_FILL_QUANTITY")
-        if self.status is BrokerOrderStatus.FILLED and self.remaining_quantity is not None:
-            if self.remaining_quantity != 0 or self.filled_quantity <= 0:
-                raise ValueError("INVALID_FILLED_QUANTITY")
+        if (
+            self.status is BrokerOrderStatus.FILLED
+            and self.remaining_quantity is not None
+            and (self.remaining_quantity != 0 or self.filled_quantity <= 0)
+        ):
+            raise ValueError("INVALID_FILLED_QUANTITY")
 
 
 @dataclass(frozen=True)
