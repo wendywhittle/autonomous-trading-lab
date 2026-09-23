@@ -890,3 +890,59 @@ def test_compliance_blocks_order_notional_limit(tmp_path):
     assert [event.event_type for event in events] == ["COMPLIANCE_DECISION"]
     assert events[0].payload["action"] == "BLOCK"
     assert events[0].payload["reason"] == "COMPLIANCE_ORDER_NOTIONAL_LIMIT"
+
+
+def test_live_execution_intent_binds_exact_authorization(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, _ = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+    authorization = coordinator_instance.authorization
+
+    coordinator_instance.submit(req())
+
+    intent = store.get("intent-1")
+    assert intent.authorization_id == authorization.authorization_id
+    assert intent.authorization_fingerprint == PromotionGate.authorization_fingerprint(authorization)
+    assert intent.authorization_issued_at == authorization.issued_at
+    assert intent.authorization_expires_at == authorization.expires_at
+
+
+def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, _ = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+    coordinator_instance.prepare(req())
+    first = store.get("intent-1")
+
+    coordinator_instance.authorization = live_authorization()
+
+    with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
+        coordinator_instance.prepare(req())
+
+    assert store.get("intent-1").authorization_id == first.authorization_id
+
+
+def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, _ = coordinator(tmp_path, broker)
+    coordinator_instance.authorization = live_authorization()
+    coordinator_instance.prepare(req())
+
+    connection = store._connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE execution_intents SET authorization_fingerprint = ? WHERE idempotency_key = ?",
+            ("tampered", "intent-1"),
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+
+    with pytest.raises(RuntimeError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
+        coordinator_instance.submit(req())
+
+    assert broker.submissions == 0
