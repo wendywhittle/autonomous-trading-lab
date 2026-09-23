@@ -163,8 +163,21 @@ class ExecutionIntentStore:
         idempotency_key: str,
         result: BrokerOrderResult,
     ) -> ExecutionIntent:
-        if self._get_in_connection(connection, idempotency_key) is None:
+        existing = self._get_in_connection(connection, idempotency_key)
+        if existing is None:
             raise KeyError("EXECUTION_INTENT_NOT_FOUND")
+
+        if existing.result is not None and existing.result != result:
+            terminal = {
+                BrokerOrderStatus.FILLED,
+                BrokerOrderStatus.CANCELED,
+                BrokerOrderStatus.REJECTED,
+            }
+            if existing.status in terminal:
+                raise ValueError("EXECUTION_TERMINAL_STATE_CONFLICT")
+            if result.status is BrokerOrderStatus.UNKNOWN:
+                raise ValueError("EXECUTION_STATE_REGRESSION")
+
         connection.execute(
             """
             UPDATE execution_intents
