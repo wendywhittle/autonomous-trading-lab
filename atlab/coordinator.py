@@ -6,6 +6,7 @@ from enum import Enum
 
 from .broker import (
     BrokerAdapter,
+    BrokerDiscoveredOrder,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatus,
@@ -321,6 +322,92 @@ class ExecutionCoordinator:
             reconciliations.append(ExecutionReconciliation(key, item.result))
 
         return tuple(reconciliations)
+
+    def reconcile_discovered_orders(self) -> tuple[ExecutionReconciliation, ...]:
+        """Reconcile provider orders discovered without relying on local state.
+
+        A provider order with no matching durable client intent is a hard
+        execution-boundary discrepancy: it is audited and the durable halt is
+        asserted before any further autonomous submission can proceed.
+        """
+        discovered = self.broker.discover_open_orders()
+        local_keys = set()
+        for key in self.store.pending_keys():
+            local_keys.add(key)
+        for key in self.store.unknown_keys():
+            local_keys.add(key)
+
+        orphans = [
+            item for item in discovered
+            if item.idempotency_key is None
+            or item.idempotency_key not in local_keys
+        ]
+        if orphans:
+            errors = tuple(
+                "EXECUTION_PROVIDER_ORDER_ORPHAN:"
+                + (item.result.broker_order_id or "UNKNOWN")
+                for item in orphans
+            )
+            from .execution_reconciliation import ExecutionConsistency
+            self.enforce_reconciliation_safety_with_errors(
+                ExecutionConsistency(False, errors)
+            )
+            raise RuntimeError("EXECUTION_PROVIDER_ORPHAN_DETECTED")
+
+        reconciliations = []
+        for item in discovered:
+            key = item.idempotency_key
+            if key is None:
+                continue
+            intent = self.store.get(key)
+            if intent is None:
+                continue
+            if intent.result is None:
+                self._commit_result(key, item.result, "EXECUTION_RECONCILED")
+                reconciliations.append(ExecutionReconciliation(key, item.result))
+            elif intent.result != item.result:
+                self._commit_result(key, item.result, "EXECUTION_RECONCILED")
+                reconciliations.append(ExecutionReconciliation(key, item.result))
+        return tuple(reconciliations)
+
+    def enforce_reconciliation_safety_with_errors(self, consistency) -> bool:
+        """Durably halt using an externally constructed reconciliation result."""
+        from .execution_reconciliation import reconciliation_halt_reason
+        reason = reconciliation_halt_reason(consistency)
+        connection = self._transaction()
+        try:
+            connection.execute(
+                """
+                INSERT INTO execution_halt(id, active, reason)
+                VALUES (1, 1, ?)
+                ON CONFLICT(id) DO UPDATE SET active = 1, reason = excluded.reason
+                """,
+                (reason,),
+            )
+            self.ledger._append_in_connection(
+                connection,
+                "EXECUTION_HALT_ASSERTED",
+                self._event_id("EXECUTION_HALT_ASSERTED", reason),
+                {"reason": reason, "errors": list(consistency.errors)},
+            )
+            connection.execute("COMMIT")
+        except ValueError as exc:
+            if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                try:
+                    connection.execute("ROLLBACK")
+                finally:
+                    connection.close()
+                raise
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
+        return True
 
     def reconcile(
         self,
