@@ -62,7 +62,7 @@ class DeterministicRiskEngine:
         required = (
             decision.decision_id, decision.action, decision.symbol,
             decision.quantity, decision.price, decision.current_position_notional,
-            decision.risk_limits_fingerprint, decision.risk_state_fingerprint,
+            decision.risk_limits_fingerprint,
         )
         if any(value is None for value in required):
             raise ValueError("RISK_EVIDENCE_INCOMPLETE")
