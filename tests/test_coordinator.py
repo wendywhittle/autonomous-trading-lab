@@ -247,7 +247,7 @@ def test_coordinator_persists_intent_before_submission(tmp_path):
 
     assert store.get("intent-1").request == req()
     events = ledger.read()
-    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION", "EXECUTION_INTENT_CREATED"]
 
 
 def test_coordinator_marks_provider_failure_unknown_and_audits(tmp_path):
@@ -285,7 +285,7 @@ def test_coordinator_audits_accepted_submission(tmp_path):
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_RESULT",
     ]
-    assert events[1].payload["broker_order_id"] == "broker-1"
+    assert events[2].payload["broker_order_id"] == "broker-1"
 
 
 def test_coordinator_does_not_resubmit_existing_external_result(tmp_path):
@@ -458,7 +458,7 @@ def test_coordinator_does_not_duplicate_intent_audit_on_retry(tmp_path):
     coordinator_instance.prepare(req())
 
     events = ledger.read()
-    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION", "EXECUTION_INTENT_CREATED"]
     assert store.pending_keys() == ("intent-1",)
 
 
@@ -505,7 +505,7 @@ def test_coordinator_result_and_audit_commit_atomically(tmp_path):
     assert intent is not None
     assert intent.result is None
     events = ledger.read()
-    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION", "EXECUTION_INTENT_CREATED"]
 
     ledger._append_in_connection = original
 
@@ -521,7 +521,7 @@ def test_concurrent_prepare_same_key_creates_one_intent_and_one_audit(tmp_path):
 
     assert store.get("intent-1").request == req()
     events = ledger.read()
-    assert [event.event_type for event in events] == ["EXECUTION_INTENT_CREATED"]
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION", "EXECUTION_INTENT_CREATED"]
 
 
 def test_provider_accepted_order_is_recovered_by_idempotency_key_after_unknown(tmp_path):
@@ -749,6 +749,54 @@ def test_compliance_blocks_restricted_symbol_before_intent_creation(tmp_path):
     assert ledger.read() == []
 
 
+def test_compliance_allow_is_durably_bound_before_intent(tmp_path):
+    broker = AcceptedBroker()
+    compliance = ComplianceEngine(
+        CompliancePolicy(policy_id="market-policy", version="7", max_order_notional=1000)
+    )
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.compliance = compliance
+
+    coordinator_instance.submit(req())
+
+    events = ledger.read()
+    assert [event.event_type for event in events] == [
+        "COMPLIANCE_DECISION",
+        "EXECUTION_INTENT_CREATED",
+        "EXECUTION_RESULT",
+    ]
+    decision = events[0].payload
+    assert decision["action"] == "ALLOW"
+    assert decision["policy_id"] == "market-policy"
+    assert decision["policy_version"] == "7"
+    assert decision["policy_fingerprint"]
+    assert events[1].payload["idempotency_key"] == "intent-1"
+    assert store.get("intent-1") is not None
+
+
+def test_compliance_review_required_is_audited_without_execution(tmp_path):
+    broker = AcceptedBroker()
+    compliance = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="market-policy",
+            version="1",
+            max_order_notional=1000,
+            review_order_notional=100,
+        )
+    )
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.compliance = compliance
+
+    with pytest.raises(RuntimeError, match="COMPLIANCE_ORDER_REQUIRES_REVIEW"):
+        coordinator_instance.submit(req())
+
+    events = ledger.read()
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION"]
+    assert events[0].payload["action"] == "REVIEW_REQUIRED"
+    assert store.get("intent-1") is None
+    assert broker.submissions == 0
+
+
 def test_compliance_blocks_order_notional_limit(tmp_path):
     broker = AcceptedBroker()
     compliance = ComplianceEngine(
@@ -773,4 +821,7 @@ def test_compliance_blocks_order_notional_limit(tmp_path):
 
     assert broker.submissions == 0
     assert store.get("large-1") is None
-    assert ledger.read() == []
+    events = ledger.read()
+    assert [event.event_type for event in events] == ["COMPLIANCE_DECISION"]
+    assert events[0].payload["action"] == "BLOCK"
+    assert events[0].payload["reason"] == "COMPLIANCE_ORDER_NOTIONAL_LIMIT"
