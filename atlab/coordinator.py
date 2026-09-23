@@ -68,6 +68,36 @@ class ExecutionCoordinator:
             else:
                 raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
 
+    def activate_execution_authorization(self, operator_reference: str) -> None:
+        if not operator_reference:
+            raise ValueError("EXECUTION_AUTHORIZATION_ACTIVATE_REFERENCE_REQUIRED")
+        authorization = self.authorization
+        if authorization is None or authorization.target is not PromotionMode.LIVE:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+        if not PromotionGate.validate_authorization(authorization):
+            raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
+        self.store.activate_authorization(authorization.authorization_id)
+        connection = self._transaction()
+        try:
+            self.ledger._append_in_connection(
+                connection,
+                "EXECUTION_AUTHORIZATION_ACTIVATED",
+                self._event_id("EXECUTION_AUTHORIZATION_ACTIVATED", authorization.authorization_id),
+                {
+                    "authorization_id": authorization.authorization_id,
+                    "operator_reference": operator_reference,
+                },
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            finally:
+                connection.close()
+            raise
+        else:
+            connection.close()
+
     def revoke_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
             raise ValueError("EXECUTION_AUTHORIZATION_REVOKE_REFERENCE_REQUIRED")
