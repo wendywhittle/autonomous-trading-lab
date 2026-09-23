@@ -444,3 +444,33 @@ def test_durable_halt_can_be_cleared_explicitly(tmp_path):
 
     assert not store.is_halted()
     assert store.halt_reason() is None
+
+
+def test_coordinator_refuses_submission_when_reconciliation_is_unhealthy(tmp_path):
+    broker = AcceptedBroker()
+    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance.prepare(req())
+    store.update_result(
+        "intent-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="EXECUTION_HALTED"):
+        coordinator_instance.submit(
+            BrokerOrderRequest(
+                idempotency_key="intent-2",
+                symbol="TEST",
+                side=Side.BUY,
+                quantity=1,
+                price=100,
+            )
+        )
+
+    assert broker.submissions == 0
+    assert store.is_halted()
+    assert any(event.event_type == "EXECUTION_HALT_ASSERTED" for event in ledger.read())
