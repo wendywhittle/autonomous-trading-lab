@@ -158,6 +158,14 @@ class PaperTradingEngine:
             else:
                 decision = proposal
             decision_events = self.ledger.events_for_decision(decision.decision_id)
+            if decision_events:
+                matching_decision = any(
+                    event.event_type == "DECISION"
+                    and event.payload == decision.model_dump(mode="json")
+                    for event in decision_events
+                )
+                if not matching_decision:
+                    raise RuntimeError("JEV_DECISION_ID_COLLISION")
             event_types = {event.event_type for event in decision_events}
 
             if "ORDER" in event_types or "RISK_BLOCK" in event_types:
