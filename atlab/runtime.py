@@ -31,6 +31,33 @@ class CycleResult:
 class PaperTradingEngine:
     """Sequential autonomous paper loop with persisted portfolio and risk state."""
 
+    @staticmethod
+    def _validate_jev_decision(
+        decision: JEVDecision,
+        strategy: StrategyVersion,
+        state,
+        proposal: JEVDecision,
+    ) -> None:
+        expected_side = {
+            "HOLD": None,
+            "ENTER": "BUY",
+            "EXIT": "SELL",
+        }[decision.action.value]
+        if decision.strategy_id != strategy.strategy_id:
+            raise RuntimeError("JEV_DECISION_STRATEGY_MISMATCH")
+        if decision.strategy_version != strategy.version:
+            raise RuntimeError("JEV_DECISION_STRATEGY_VERSION_MISMATCH")
+        if decision.symbol != state.symbol:
+            raise RuntimeError("JEV_DECISION_SYMBOL_MISMATCH")
+        if decision.state_fingerprint != state.state_fingerprint:
+            raise RuntimeError("JEV_DECISION_STATE_MISMATCH")
+        if decision.side is not None and decision.side.value != expected_side:
+            raise RuntimeError("JEV_DECISION_SIDE_MISMATCH")
+        if decision.action.value != "HOLD" and decision.side is None:
+            raise RuntimeError("JEV_DECISION_SIDE_MISSING")
+        if decision.decision_id == proposal.decision_id:
+            raise RuntimeError("JEV_DECISION_ID_COLLISION")
+
     def __init__(
         self,
         adapter: MarketDataAdapter,
@@ -104,9 +131,22 @@ class PaperTradingEngine:
                 if len(evaluation_events) != 1:
                     raise RuntimeError("JEV_EVALUATION_DUPLICATE")
                 evaluation_payload = evaluation_events[0].payload
-                decision = JEVDecision.model_validate(evaluation_payload["decision"])
+                if evaluation_payload.get("proposal_id") != proposal.decision_id:
+                    raise RuntimeError("JEV_EVALUATION_PROPOSAL_MISMATCH")
+                try:
+                    decision = JEVDecision.model_validate(
+                        evaluation_payload["decision"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError("JEV_EVALUATION_INVALID") from exc
+                self._validate_jev_decision(
+                    decision, self.strategy, state, proposal
+                )
             elif self.jev:
                 decision = self.jev.evaluate(self.strategy, state, proposal)
+                self._validate_jev_decision(
+                    decision, self.strategy, state, proposal
+                )
                 self.ledger.append(
                     "JEV_EVALUATION",
                     f"jev-{proposal.decision_id}",
