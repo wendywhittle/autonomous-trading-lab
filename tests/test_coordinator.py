@@ -877,7 +877,7 @@ def test_new_live_authorization_replaces_previous_active_session(tmp_path):
     broker.mode = BrokerMode.LIVE
     first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
     first.activate_execution_authorization("operator-first")
-    first.submit(req())
+    first.submit(req(), risk_for_live(req()))
     first_id = first.authorization.authorization_id
 
     second, _, _ = coordinator(tmp_path, broker, authorization=live_authorization())
@@ -894,7 +894,7 @@ def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
     first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
-    first.submit(req())
+    first.submit(req(), risk_for_live(req()))
     first.revoke_execution_authorization("operator-revoke")
 
     second, _, _ = coordinator(tmp_path, broker, authorization=first.authorization)
