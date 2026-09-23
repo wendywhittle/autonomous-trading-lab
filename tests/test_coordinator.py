@@ -128,7 +128,7 @@ def test_coordinator_audits_accepted_submission(tmp_path):
 
 def test_coordinator_does_not_resubmit_existing_external_result(tmp_path):
     broker = AcceptedBroker()
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    coordinator_instance, _, ledger = coordinator(tmp_path, broker)
 
     first = coordinator_instance.submit(req())
     second = coordinator_instance.submit(req())
