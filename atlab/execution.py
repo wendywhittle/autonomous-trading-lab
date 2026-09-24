@@ -279,6 +279,13 @@ class ExecutionIntentStore:
         if risk_decision.risk_state_fingerprint!=state.fingerprint(): raise RuntimeError("RISK_STATE_CHANGED_AFTER_APPROVAL")
         if risk_decision.risk_limits_fingerprint!=limits.fingerprint(): raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
         if risk_decision.decision_id!=request.decision_id: raise RuntimeError("RISK_DECISION_ID_CONFLICT")
+        # An intent already bound to a different authority fails closed here,
+        # before the active-authorization check, so a hijacking attempt
+        # surfaces as an authorization conflict rather than an activation
+        # error. _record_in_connection re-verifies the full binding below.
+        existing = self._get_in_connection(connection, request.idempotency_key)
+        if existing is not None and (existing.authorization_id, existing.authorization_fingerprint, existing.authorization_issued_at, existing.authorization_expires_at) != authorization_binding:
+            raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
         auth_row=connection.execute("SELECT active_authorization_id FROM execution_authorization_state WHERE id=1").fetchone()
         if not auth_row or auth_row[0] != authorization_binding[0]: raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
         if self.is_halted_in_connection(connection): raise RuntimeError("EXECUTION_HALTED")
@@ -304,7 +311,11 @@ class ExecutionIntentStore:
         ).fetchone()
         active = bool(row and row[0] == authorization_id)
         if active:
-            if connection.execute("""SELECT 1 FROM execution_intents WHERE authorization_id = ? AND status IN (?, ?, ?) LIMIT 1""",(authorization_id,BrokerOrderStatus.UNKNOWN.value,BrokerOrderStatus.ACCEPTED.value,BrokerOrderStatus.PARTIALLY_FILLED.value)).fetchone():
+            # Revocation is blocked only by genuine provider-side uncertainty:
+            # an intent the broker was contacted for whose outcome is unknown.
+            # Prepared-but-unsubmitted intents (no result) and known states do
+            # not represent live provider exposure.
+            if connection.execute("""SELECT 1 FROM execution_intents WHERE authorization_id = ? AND status = ? AND result IS NOT NULL LIMIT 1""",(authorization_id,BrokerOrderStatus.UNKNOWN.value)).fetchone():
                 raise RuntimeError("EXECUTION_AUTHORIZATION_REVOCATION_BLOCKED_BY_ACTIVE_AUTHORITY")
             connection.execute("UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1")
         return active

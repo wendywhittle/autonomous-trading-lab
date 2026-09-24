@@ -1,8 +1,8 @@
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from enum import Enum
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import Enum
 
 
 class PromotionMode(str, Enum):
@@ -122,7 +122,7 @@ class PromotionGate:
         try:
             issued = datetime.fromisoformat(authorization.issued_at)
             expires = datetime.fromisoformat(authorization.expires_at)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if issued.tzinfo is None or expires.tzinfo is None:
                 return False
             if expires <= issued or now >= expires or issued > now + timedelta(seconds=5):
@@ -146,10 +146,10 @@ class PromotionGate:
             raise RuntimeError("PROMOTION_NOT_ELIGIBLE:" + "|".join(result.failed_requirements))
         if ttl_seconds <= 0:
             raise ValueError("EXECUTION_AUTHORIZATION_TTL_INVALID")
-        issued = now or datetime.now(timezone.utc)
+        issued = now or datetime.now(UTC)
         if issued.tzinfo is None:
             raise ValueError("EXECUTION_AUTHORIZATION_TIMEZONE_REQUIRED")
-        issued = issued.astimezone(timezone.utc)
+        issued = issued.astimezone(UTC)
         expires = issued + timedelta(seconds=ttl_seconds)
         issued_at = issued.isoformat()
         expires_at = expires.isoformat()

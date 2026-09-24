@@ -12,6 +12,12 @@ dependencies = ["pydantic>=2.7,<3", "typesafe-sdk>=0.7,<0.8"]
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "ruff>=0.6,<1"]
 
+[project.scripts]
+atlab = "atlab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["atlab*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

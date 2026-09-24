@@ -1,3 +1,5 @@
+from datetime import UTC
+
 from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
@@ -83,7 +85,7 @@ def test_live_authorization_rejects_tampering():
 
 
 def test_live_authorization_rejects_expired_artifact():
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     approved = evidence(
         no_live_credentials=False,
         live_credentials_configured=True,
@@ -91,7 +93,7 @@ def test_live_authorization_rejects_expired_artifact():
         live_controls_verified=True,
         human_approval=True,
     )
-    issued = datetime.now(timezone.utc) - timedelta(minutes=10)
+    issued = datetime.now(UTC) - timedelta(minutes=10)
     authorization = PromotionGate().authorize(approved, PromotionMode.LIVE, ttl_seconds=60, now=issued)
     assert not PromotionGate.validate_authorization(authorization)
 

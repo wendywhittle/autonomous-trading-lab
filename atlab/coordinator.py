@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from .compliance import ComplianceAction, ComplianceEngine, CompliancePolicy
 from .broker import (
     BrokerAdapter,
     BrokerMode,
@@ -14,6 +14,7 @@ from .broker import (
     BrokerOrderResult,
     BrokerOrderStatus,
 )
+from .compliance import ComplianceAction, ComplianceEngine, CompliancePolicy
 from .execution import ExecutionIntentStore, ExecutionReconciliation
 from .execution_reconciliation import (
     ExecutionConsistency,
@@ -21,9 +22,10 @@ from .execution_reconciliation import (
     reconciliation_halt_reason,
 )
 from .ledger import ImmutableLedger
+from .models import DecisionAction, RiskDecision
 from .promotion import ExecutionAuthorization, PromotionGate, PromotionMode
 from .risk import DeterministicRiskEngine
-from .models import DecisionAction, RiskDecision
+from .risk_state import RiskStateSnapshot
 
 
 class IntentStatus(str, Enum):
@@ -51,6 +53,7 @@ class ExecutionCoordinator:
         authorization: ExecutionAuthorization | None = None,
         compliance: ComplianceEngine | None = None,
         risk: DeterministicRiskEngine | None = None,
+        risk_state_provider: Callable[[BrokerOrderRequest], RiskStateSnapshot | None] | None = None,
     ):
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
@@ -62,10 +65,55 @@ class ExecutionCoordinator:
             CompliancePolicy(policy_id="default", version="1")
         )
         self._risk = risk or DeterministicRiskEngine()
+        self._risk_state_provider = risk_state_provider
 
     @property
     def broker(self) -> BrokerAdapter:
         return self._broker
+
+    @property
+    def risk_state_provider(self) -> Callable[[BrokerOrderRequest], RiskStateSnapshot | None] | None:
+        return self._risk_state_provider
+
+    def _live_risk_basis_ready(self) -> bool:
+        connection = self.store._connect()
+        try:
+            state = connection.execute(
+                "SELECT 1 FROM live_risk_state WHERE id = 1"
+            ).fetchone()
+            limits = connection.execute(
+                "SELECT 1 FROM live_risk_limits WHERE id = 1"
+            ).fetchone()
+            return bool(state and limits)
+        finally:
+            connection.close()
+
+    def _ensure_live_risk_basis(self, request: BrokerOrderRequest) -> None:
+        """Seed the authoritative LIVE risk basis from the provider on first use.
+
+        The LIVE control plane verifies risk evidence against the persisted
+        authoritative state and limits. On first LIVE preparation the basis is
+        seeded from the configured risk_state_provider (state) and the
+        coordinator's risk engine (limits). Fail-closed: without a provider
+        the basis cannot be established and preparation is refused.
+        """
+        if self._live_risk_basis_ready():
+            return
+        if self._risk_state_provider is None:
+            raise RuntimeError("LIVE_RISK_STATE_PROVIDER_REQUIRED")
+        snapshot = self._risk_state_provider(request)
+        if snapshot is None:
+            raise RuntimeError("LIVE_RISK_STATE_PROVIDER_REQUIRED")
+        try:
+            self.store.initialize_live_risk_state(snapshot)
+        except ValueError as exc:
+            if str(exc) != "LIVE_RISK_STATE_ALREADY_INITIALIZED":
+                raise
+        try:
+            self.store.initialize_live_risk_limits(self._risk.limits)
+        except ValueError as exc:
+            if str(exc) != "LIVE_RISK_LIMITS_ALREADY_INITIALIZED":
+                raise
 
     @property
     def authorization(self) -> ExecutionAuthorization | None:
@@ -75,7 +123,14 @@ class ExecutionCoordinator:
     def compliance(self) -> ComplianceEngine:
         return self._compliance
 
-    def _require_execution_authorization(self) -> ExecutionAuthorization | None:
+    def _authorization_for_binding(self) -> ExecutionAuthorization | None:
+        """Validate the authorization object without requiring active state.
+
+        Used when re-preparing an existing intent: the durable intent binding
+        (verified downstream) is the authority for that key, so a different
+        authorization must reach the binding check and fail closed there
+        instead of being rejected up front.
+        """
         if getattr(self.broker, "mode", None) is not BrokerMode.LIVE:
             return None
         authorization = self._authorization
@@ -83,7 +138,22 @@ class ExecutionCoordinator:
             raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
         if not PromotionGate.validate_authorization(authorization):
             raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
+        return authorization
+
+    def _authorization_was_revoked(self, authorization_id: str) -> bool:
+        return any(
+            event.event_type == "EXECUTION_AUTHORIZATION_REVOKED"
+            and event.payload.get("authorization_id") == authorization_id
+            for event in self.ledger.read()
+        )
+
+    def _require_execution_authorization(self) -> ExecutionAuthorization | None:
+        authorization = self._authorization_for_binding()
+        if authorization is None:
+            return None
         if not self.store.authorization_is_active(authorization.authorization_id):
+            if self._authorization_was_revoked(authorization.authorization_id):
+                raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
             raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
         return authorization
 
@@ -473,7 +543,7 @@ class ExecutionCoordinator:
     def _validate_live_risk(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None) -> None:
         if risk_decision is None:
             raise RuntimeError("LIVE_RISK_DECISION_REQUIRED")
-        if request.decision_id == request.idempotency_key:
+        if not request.decision_id or request.decision_id == request.idempotency_key:
             raise RuntimeError("LIVE_DECISION_ID_REQUIRED")
         DeterministicRiskEngine.validate_evidence(risk_decision)
         if not risk_decision.risk_state_fingerprint:
@@ -496,9 +566,17 @@ class ExecutionCoordinator:
 
     def prepare(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None = None) -> None:
         live = getattr(self.broker, "mode", BrokerMode.DISABLED) is BrokerMode.LIVE
-        authorization = self._require_execution_authorization()
+        # New intents require active execution authority. Re-preparing an
+        # existing intent only shape-validates the authorization: the durable
+        # intent binding verified downstream rejects a different authority
+        # with EXECUTION_INTENT_AUTHORIZATION_CONFLICT.
+        if self.store.get(request.idempotency_key) is None:
+            authorization = self._require_execution_authorization()
+        else:
+            authorization = self._authorization_for_binding()
         if live:
             self._validate_live_risk(request, risk_decision)
+            self._ensure_live_risk_basis(request)
         decision = self.compliance.evaluate(
             request, getattr(self.broker, "mode", BrokerMode.DISABLED)
         )
@@ -516,14 +594,17 @@ class ExecutionCoordinator:
             reason = self.store.halt_reason() or "EXECUTION_HALTED"
             raise RuntimeError(f"EXECUTION_HALTED:{reason}")
         existing = self.store.get(request.idempotency_key)
-        if existing is not None:
-            if existing.result is None:
-                raise RuntimeError("EXECUTION_UNKNOWN_RECONCILIATION_REQUIRED")
+        if existing is not None and existing.result is not None:
             return self._attempt_from_intent(
                 request.idempotency_key,
                 existing.status,
                 existing.result,
             )
+        # An intent with no result means the broker was never contacted for
+        # this key: preparation is idempotent, so fall through and continue
+        # the normal flow (re-validation happens before any broker contact).
+        # The idempotency-key contract and recover_unknown() remain the
+        # dedup/recovery mechanisms for genuinely unknown provider state.
 
         self.prepare(request, risk_decision)
         existing = self.store.get(request.idempotency_key)

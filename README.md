@@ -12,9 +12,11 @@ JEV is an explicit evaluation boundary, not a simulated capability. The reposito
 
 ## M0 boundary
 
-M0 provides deterministic state construction, immutable strategy-version handling, hard risk limits, a kill switch with audit events, simulated paper fills, persistent paper portfolio and risk-session state, restart-safe decision/order idempotency, provider-independent broker contracts, durable execution intents, atomic execution-state-plus-audit transactions, operational observability and reconciliation, replay validation, reproducible data snapshots and experiment identity, concurrency stress coverage, and explicit promotion gates.
+M0 provides deterministic state construction, immutable strategy-version handling, hard risk limits, a kill switch with audit events, simulated paper fills, persistent paper portfolio and risk-session state, restart-safe decision/order idempotency, provider-independent broker contracts, durable execution intents, atomic execution-state-plus-audit transactions, operational observability and reconciliation, replay validation, reproducible data snapshots and experiment identity, concurrency stress coverage, explicit promotion gates, a CLI (`atlab run`, `atlab backtest`), a CSV OHLCV market-data adapter, and deterministic backtest metrics (equity curve, max drawdown, Sharpe ratio, total return, win rate, trade counts).
 
 **Live brokerage execution is not implemented or enabled in M0.** No API keys or broker credentials belong in source control. The promotion gate refuses LIVE eligibility until a real live execution path and its controls are implemented and independently verified.
+
+A LIVE *control-plane scaffold* exists (execution authorization lifecycle, durable intent binding, persisted LIVE risk authority with optimistic concurrency, revocation semantics), but there is **no live broker adapter** and the default broker remains `DisabledBroker`. The scaffold is a research model of the controls a live path would need; it must not be mistaken for live-trading capability.
 
 ## Safety properties
 
@@ -42,16 +44,27 @@ python -m pip install -e ".[dev]"
 pytest
 ruff check .
 
+### CLI
+
+Paper/research only. No JEV API or live broker is required.
+
+```bash
+atlab backtest --csv data/sample_ohlcv.csv --symbol SYNTH --workdir ./lab-backtest
+atlab run --csv data/sample_ohlcv.csv --symbol SYNTH --workdir ./lab-run
+```
+
+`data/sample_ohlcv.csv` is a small synthetic daily OHLCV series (seeded PRNG, clearly labeled) for smoke-testing the CSV adapter and backtest metrics. `atlab run` drives the paper trading engine end-to-end and persists the portfolio state, risk-session state, and event ledger under `--workdir`. `atlab backtest` runs the same loop and prints deterministic metrics: trade counts, equity, total return, max drawdown, Sharpe ratio (risk-free 0), and win rate over completed round trips.
+
 ### Live Jev connectivity
 
 The repository includes a manual GitHub Actions workflow, `Jev live smoke`, that uses the repository secret `TYPESAFE_API_KEY` to make one real TypeSafe/Jev evaluation. It is deliberately manual so ordinary CI never spends API calls. Live brokerage execution remains disabled.
 
 ## Next layers
 
-1. Harden provider-side recovery so an UNKNOWN submission can be reconciled by client/idempotency key, not only broker order ID.
-2. Add cash/leverage-aware risk limits and operational failure handling.
-3. Add compliance/governance policy boundaries, audit requirements, and controlled promotion evidence.
-4. Build the live execution boundary only after controls, permissions, provider-side idempotency, reconciliation, and independent verification exist.
+1. Strategy research surface: parameter sweeps and experiment tracking on top of the backtest metrics, reusing the content-addressed snapshots and experiment identity.
+2. Richer market-data adapters (additional venues/formats) behind the same provider-independent contract; no future leakage by construction.
+3. Cash/leverage-aware risk limit calibration tooling and operational runbooks for paper deployment.
+4. Build the live execution boundary only after controls, permissions, provider-side idempotency, reconciliation, and independent verification exist. The LIVE control-plane scaffold documents the intended shape; a real broker adapter remains a separate, explicit decision.
 
 ## Design principle
 
