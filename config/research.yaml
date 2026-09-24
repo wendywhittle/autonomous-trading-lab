@@ -1,0 +1,41 @@
+# Research configuration for the autonomous trading lab.
+#
+# Mirrors atlab.research.config.ResearchConfig.defaults(). The Python module is
+# authoritative until a YAML loader lands; if they diverge, update this file
+# to match the module.
+#
+# Every number here is an initial research parameter, not a sacred constant.
+# Thresholds are optimized through out-of-sample testing, never hard-coded
+# as truth (Sniper v1 spec, section 8).
+
+walk_forward:
+  train_size: 63        # bars; ~3 months of daily bars
+  validate_size: 21     # bars; ~1 month
+  test_size: 21         # bars; ~1 month
+  step: 21              # bars; roll forward one month per window
+  expanding: true
+  embargo: 0            # dead-zone bars between train end and validation start
+
+costs:
+  base:
+    name: retail-base
+    fee_flat: 0.0
+    fee_bps: 0.0
+    slippage_bps: 10.0
+    spread_bps: 5.0
+  stress:               # harsher assumptions the edge must also survive
+    name: retail-stress
+    fee_flat: 0.0
+    fee_bps: 0.0
+    slippage_bps: 20.0
+    spread_bps: 10.0
+
+gate:
+  min_expectancy_per_trade: 0.0
+  min_window_fraction: 1.0   # every walk-forward window must be net positive
+  min_neighbor_fraction: 0.8 # 80% of nearby-parameter runs must be net positive
+  min_regimes: 2
+  paper_rel_tol: 0.5
+  paper_abs_tol: 0.05        # dollars per trade
+
+notional_per_trade: 10.0     # declared cost-math assumption; charter: $10/trade
