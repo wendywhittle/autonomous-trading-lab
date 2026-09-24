@@ -143,16 +143,22 @@ class DeterministicRiskEngine:
             return result(False, "INVALID_AVAILABLE_CASH", 0)
         if equity is not None and equity < 0:
             return result(False, "INVALID_EQUITY", 0)
-        if equity is not None and session_start_equity is not None:
-            if session_start_equity < 0:
-                return result(False, "INVALID_EQUITY", 0)
-            if session_start_equity - equity > self.limits.max_daily_loss:
-                return result(False, "DAILY_LOSS_LIMIT", 0)
-        if equity is not None and high_water_mark is not None:
-            if high_water_mark < 0:
-                return result(False, "INVALID_EQUITY", 0)
-            if high_water_mark - equity > self.limits.max_drawdown:
-                return result(False, "DRAWDOWN_LIMIT", 0)
+        # Loss halts gate NEW risk only. A SELL in this engine can only
+        # reduce an existing position (naked sells are rejected as
+        # INSUFFICIENT_POSITION below), so blocking exits on losses would
+        # trap the system in a bleeding position -- including its own
+        # stop-loss. Exits always pass the loss gates.
+        if decision.side is not Side.SELL:
+            if equity is not None and session_start_equity is not None:
+                if session_start_equity < 0:
+                    return result(False, "INVALID_EQUITY", 0)
+                if session_start_equity - equity > self.limits.max_daily_loss:
+                    return result(False, "DAILY_LOSS_LIMIT", 0)
+            if equity is not None and high_water_mark is not None:
+                if high_water_mark < 0:
+                    return result(False, "INVALID_EQUITY", 0)
+                if high_water_mark - equity > self.limits.max_drawdown:
+                    return result(False, "DRAWDOWN_LIMIT", 0)
 
         expected_side = {
             DecisionAction.HOLD: None, DecisionAction.ENTER: Side.BUY,
