@@ -129,12 +129,14 @@ def risk_for(req, snapshot):
     )
 
 
-def make_coordinator(tmp_path, broker=None, provider=None, risk=None):
+def make_coordinator(tmp_path, broker=None, risk=None):
     broker = broker or CountingLiveBroker()
     snapshot = state()
-    provider = provider or (lambda request: snapshot)
+    risk = risk or DeterministicRiskEngine()
     db = tmp_path / "execution.sqlite3"
     store = ExecutionIntentStore(db)
+    store.initialize_live_risk_state(snapshot)
+    store.initialize_live_risk_limits(risk.limits)
     ledger = ImmutableLedger(db)
     instance = ExecutionCoordinator(
         store,
@@ -145,7 +147,6 @@ def make_coordinator(tmp_path, broker=None, provider=None, risk=None):
             CompliancePolicy(policy_id="test-policy", version="1")
         ),
         risk=risk,
-        risk_state_provider=provider,
     )
     instance.activate_execution_authorization("test-activate")
     return instance, store, ledger, broker, snapshot
@@ -178,80 +179,33 @@ def test_live_risk_evidence_is_state_bound_and_persisted(tmp_path):
     assert intent.risk_fingerprint == intent.risk_decision.risk_fingerprint
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        lambda: state(position=101),
-        lambda: state(cash=800),
-        lambda: state(equity=900, high_water=1000),
-    ],
-)
+@pytest.mark.parametrize("mutation",[lambda: state(position=101),lambda: state(cash=800),lambda: state(equity=900,high_water=1000)])
 def test_authoritative_risk_state_mutation_blocks_before_broker(tmp_path, mutation):
-    current = state()
-    coordinator, store, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: current
-    )
-    req = request()
-    evidence = risk_for(req, current)
-
-    current = mutation()
-
-    with pytest.raises(RuntimeError, match="RISK_STATE_"):
-        coordinator.submit(req, evidence)
-
-    assert broker.submissions == 0
+    coordinator, store, _, broker, current = make_coordinator(tmp_path)
+    req=request(); evidence=risk_for(req,current); store.mutate_live_risk_state(mutation(),0)
+    with pytest.raises(RuntimeError, match="RISK_STATE_CHANGED_AFTER_APPROVAL"): coordinator.submit(req,evidence)
+    assert broker.submissions==0
     assert store.get(req.idempotency_key) is None
 
 
-def test_final_risk_state_race_blocks_and_leaves_intent_auditable(tmp_path):
-    original = state()
-    mutated = state(cash=800)
-    calls = 0
-
-    def provider(request):
-        nonlocal calls
-        calls += 1
-        return original if calls == 1 else mutated
-
-    coordinator, store, ledger, broker, _ = make_coordinator(
-        tmp_path, provider=provider
-    )
-    req = request()
-    evidence = risk_for(req, original)
-
-    with pytest.raises(RuntimeError, match="RISK_STATE_CHANGED_AFTER_APPROVAL"):
-        coordinator.submit(req, evidence)
-
-    assert calls >= 2
-    assert broker.submissions == 0
-    assert store.get(req.idempotency_key) is not None
-    assert any(
-        event.event_type == "EXECUTION_INTENT_CREATED"
-        for event in ledger.read()
-    )
-
+def test_live_execution_authority_blocks_risk_mutation(tmp_path):
+    coordinator, store, _, broker, current = make_coordinator(tmp_path)
+    req=request(); evidence=risk_for(req,current); result=coordinator.submit(req,evidence)
+    assert result.result.status is BrokerOrderStatus.ACCEPTED
+    assert broker.submissions==1
+    with pytest.raises(RuntimeError, match="MUTATION_BLOCKED_BY_ACTIVE_AUTHORITY"):
+        store.mutate_live_risk_state(state(cash=800),0)
 
 def test_risk_limit_mutation_blocks(tmp_path):
-    current = state()
-    risk = DeterministicRiskEngine(RiskLimits(max_order_notional=2500))
-    coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: current, risk=risk
-    )
-    req = request()
-    evidence = risk_for(req, current)
-
-    risk.limits = RiskLimits(max_order_notional=99)
-
-    with pytest.raises(RuntimeError, match="RISK_LIMITS_FINGERPRINT_CONFLICT"):
-        coordinator.submit(req, evidence)
-
-    assert broker.submissions == 0
-
+    current=state(); coordinator,store,_,broker,_=make_coordinator(tmp_path); req=request(); evidence=risk_for(req,current)
+    store.mutate_live_risk_limits(RiskLimits(max_order_notional=99),0)
+    with pytest.raises(RuntimeError,match="RISK_LIMITS_FINGERPRINT_CONFLICT"): coordinator.submit(req,evidence)
+    assert broker.submissions==0
 
 def test_material_order_mutation_invalidates_risk_evidence(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     original = request()
     evidence = risk_for(original, snapshot)
@@ -267,7 +221,7 @@ def test_material_order_mutation_invalidates_risk_evidence(tmp_path):
 def test_tampered_risk_fingerprint_is_blocked(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     req = request()
     evidence = risk_for(req, snapshot).model_copy(update={"risk_fingerprint": "tampered"})
@@ -291,7 +245,7 @@ def test_market_order_without_reference_price_is_blocked(tmp_path):
 def test_market_order_uses_deterministic_reference_price(tmp_path):
     snapshot = state()
     coordinator, store, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     req = request(price=None, reference_price=100)
     evidence = risk_for(req, snapshot)
@@ -306,7 +260,7 @@ def test_market_order_uses_deterministic_reference_price(tmp_path):
 def test_hold_risk_evidence_cannot_execute(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     req = request()
     decision = JEVDecision(
@@ -341,7 +295,7 @@ def test_hold_risk_evidence_cannot_execute(tmp_path):
 def test_live_missing_decision_identity_is_rejected(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     req = BrokerOrderRequest(
         idempotency_key="risk-1",
@@ -371,7 +325,7 @@ def test_live_missing_decision_identity_is_rejected(tmp_path):
 def test_live_requires_distinct_decision_identity(tmp_path):
     snapshot = state()
     coordinator, _, _, broker, _ = make_coordinator(
-        tmp_path, provider=lambda request: snapshot
+        tmp_path
     )
     req = request(decision_id="risk-1")
     evidence = risk_for(req, snapshot)

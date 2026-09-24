@@ -279,6 +279,8 @@ class ExecutionIntentStore:
         if risk_decision.risk_state_fingerprint!=state.fingerprint(): raise RuntimeError("RISK_STATE_CHANGED_AFTER_APPROVAL")
         if risk_decision.risk_limits_fingerprint!=limits.fingerprint(): raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
         if risk_decision.decision_id!=request.decision_id: raise RuntimeError("RISK_DECISION_ID_CONFLICT")
+        auth_row=connection.execute("SELECT active_authorization_id FROM execution_authorization_state WHERE id=1").fetchone()
+        if not auth_row or auth_row[0] != authorization_binding[0]: raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
         if self.is_halted_in_connection(connection): raise RuntimeError("EXECUTION_HALTED")
         return self._record_in_connection(connection,request,authorization_binding,risk_decision,int(state_row[6]),state.fingerprint(),int(limits_row[5]),limits.fingerprint())
 
