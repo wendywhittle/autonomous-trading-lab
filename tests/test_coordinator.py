@@ -1199,3 +1199,37 @@ def test_resultless_intent_refuses_resubmission_after_restart(tmp_path):
     assert broker.submissions == 0
     assert restarted_broker.submissions == 0
     assert store.get("intent-1").result is None
+
+
+def test_coordinator_result_recommit_with_flipped_types_is_idempotent(tmp_path):
+    # M11 end-to-end: pre-fix, a result committed with int quantities and
+    # re-committed with float quantities produced different
+    # _result_event_id digests and appended a duplicate EXECUTION_RESULT
+    # event. Post-canonicalization the retry digests identically and the
+    # re-commit is a no-op.
+    coordinator_instance, _, ledger = coordinator(tmp_path, AcceptedBroker())
+    coordinator_instance.prepare(req())
+
+    result = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.ACCEPTED,
+        message="ACCEPTED",
+    )
+    coordinator_instance._commit_result("intent-1", result, "EXECUTION_RESULT")
+    # The flipped-type retry now canonicalizes to the identical result.
+    coordinator_instance._commit_result(
+        "intent-1",
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        ),
+        "EXECUTION_RESULT",
+    )
+
+    result_events = [
+        event for event in ledger.read() if event.event_type == "EXECUTION_RESULT"
+    ]
+    assert len(result_events) == 1

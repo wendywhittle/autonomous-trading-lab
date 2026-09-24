@@ -95,13 +95,22 @@ class PaperTradingEngine:
             else None
         )
         if self.portfolio_state_path and self.portfolio_state_path.exists():
-            self.portfolio.load_state(self.portfolio_state_path)
+            # M6: fail closed if the ledger database was replaced after this
+            # portfolio state was written.
+            self.portfolio.load_state(
+                self.portfolio_state_path,
+                expected_ledger_identity=self.ledger.identity,
+            )
         elif self.portfolio_state_path:
-            self.portfolio.save_state(self.portfolio_state_path)
+            self.portfolio.save_state(
+                self.portfolio_state_path, ledger_identity=self.ledger.identity
+            )
 
     def _persist_state(self) -> None:
         if self.portfolio_state_path:
-            self.portfolio.save_state(self.portfolio_state_path)
+            self.portfolio.save_state(
+                self.portfolio_state_path, ledger_identity=self.ledger.identity
+            )
         if self.risk_state_path and self.risk_session is not None:
             self.risk_session.save(self.risk_state_path)
 
@@ -211,6 +220,11 @@ class PaperTradingEngine:
                     equity=pre_trade_snapshot.equity,
                     session_start_equity=self.risk_session.session_start_equity,
                     high_water_mark=self.risk_session.high_water_mark,
+                    # M3: the cash check was dead because available_cash was
+                    # never supplied; a BUY larger than cash is now blocked
+                    # with INSUFFICIENT_CASH before it can drive cash
+                    # negative.
+                    available_cash=pre_trade_snapshot.cash,
                 )
                 self._append_risk_evaluation(
                     decision,

@@ -5,7 +5,7 @@ import pytest
 from atlab.ledger import ImmutableLedger
 from atlab.models import DecisionAction, MarketObservation, StrategyVersion
 from atlab.paper import PaperExecution
-from atlab.replay import replay
+from atlab.replay import validate_ledger_sequence
 from atlab.risk import DeterministicRiskEngine, RiskLimits
 from atlab.state import build_state
 from atlab.strategy import make_decision
@@ -82,4 +82,4 @@ def test_ledger_replay(tmp_path):
     ledger = ImmutableLedger(tmp_path / "ledger.jsonl")
     ledger.append("DECISION", "d1", {"action": "ENTER"})
     ledger.append("ORDER", "o1", {"status": "FILLED"})
-    assert replay(ledger.read()) == ["d1", "o1"]
+    assert validate_ledger_sequence(ledger.read()) == ["d1", "o1"]

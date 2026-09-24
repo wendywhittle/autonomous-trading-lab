@@ -33,6 +33,11 @@ class PaperPortfolio:
             return self.snapshot(order.fill_price)
 
         if order.side is Side.BUY:
+            # M3: defense in depth — the risk engine already blocks
+            # INSUFFICIENT_CASH when available_cash is supplied, but apply()
+            # itself must never let cash go negative no matter who calls it.
+            if order.notional > self.cash:
+                raise ValueError("INSUFFICIENT_CASH")
             new_qty = self.position_quantity + order.quantity
             self.average_cost = (
                 (self.position_quantity * self.average_cost) + order.notional
@@ -62,27 +67,55 @@ class PaperPortfolio:
         """
         return order_id in self._applied_order_ids
 
-    def state(self) -> dict:
-        return {
+    def state(self, ledger_identity: str | None = None) -> dict:
+        payload = {
             "cash": self.cash,
             "position_quantity": self.position_quantity,
             "average_cost": self.average_cost,
             "realized_pnl": self.realized_pnl,
             "applied_order_ids": sorted(self._applied_order_ids),
         }
+        # M6: bind the portfolio snapshot to the ledger database it was
+        # written alongside. If the ledger file is deleted and recreated
+        # mid-run, its identity changes and load_state() fails closed
+        # instead of silently restarting history at sequence 0.
+        if ledger_identity is not None:
+            payload["ledger_identity"] = ledger_identity
+        return payload
 
-    def save_state(self, path: str | Path) -> None:
+    def save_state(
+        self, path: str | Path, ledger_identity: str | None = None
+    ) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(
-            json.dumps(self.state(), sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                self.state(ledger_identity), sort_keys=True, separators=(",", ":")
+            ),
             encoding="utf-8",
         )
         temporary.replace(target)
 
-    def load_state(self, path: str | Path) -> None:
+    def load_state(
+        self, path: str | Path, expected_ledger_identity: str | None = None
+    ) -> None:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
+        stored_identity = data.get("ledger_identity")
+        if stored_identity is not None and not (
+            isinstance(stored_identity, str) and stored_identity
+        ):
+            raise ValueError("INVALID_PORTFOLIO_STATE")
+        if (
+            expected_ledger_identity is not None
+            and stored_identity is not None
+            and stored_identity != expected_ledger_identity
+        ):
+            # The ledger database was replaced (or is a different database)
+            # after this portfolio state was written. Continuing would fork
+            # the audit trail: the new ledger restarts at sequence 0 while
+            # the portfolio references the old history.
+            raise ValueError("LEDGER_IDENTITY_MISMATCH")
         required = {
             "cash",
             "position_quantity",
@@ -90,7 +123,12 @@ class PaperPortfolio:
             "realized_pnl",
             "applied_order_ids",
         }
-        if set(data) != required or not isinstance(data["applied_order_ids"], list):
+        allowed = required | {"ledger_identity"}
+        if (
+            not required <= set(data)
+            or not set(data) <= allowed
+            or not isinstance(data["applied_order_ids"], list)
+        ):
             raise ValueError("INVALID_PORTFOLIO_STATE")
         values = {
             key: float(data[key])

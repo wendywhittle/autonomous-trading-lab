@@ -165,3 +165,55 @@ def test_broker_result_rejects_rejected_status_marked_accepted():
             status=BrokerOrderStatus.REJECTED,
             message="forged",
         )
+
+
+def test_request_canonicalizes_int_to_float():
+    # M11: int and float spellings of the same value must be identical —
+    # otherwise _result_event_id digests differ and a retried intent
+    # re-committed with flipped types appends a duplicate EXECUTION_RESULT.
+    int_request = BrokerOrderRequest(
+        idempotency_key="k", symbol="TEST", side=Side.BUY,
+        quantity=10, price=100, reference_price=100,
+    )
+    float_request = BrokerOrderRequest(
+        idempotency_key="k", symbol="TEST", side=Side.BUY,
+        quantity=10.0, price=100.0, reference_price=100.0,
+    )
+    assert int_request == float_request
+    assert isinstance(int_request.quantity, float)
+    assert isinstance(int_request.price, float)
+    assert isinstance(int_request.reference_price, float)
+
+
+def test_result_canonicalizes_int_to_float():
+    int_result = BrokerOrderResult(
+        accepted=True, broker_order_id="b1", status=BrokerOrderStatus.FILLED,
+        message="ok", filled_quantity=10, remaining_quantity=0,
+    )
+    float_result = BrokerOrderResult(
+        accepted=True, broker_order_id="b1", status=BrokerOrderStatus.FILLED,
+        message="ok", filled_quantity=10.0, remaining_quantity=0.0,
+    )
+    assert int_result == float_result
+    assert isinstance(int_result.filled_quantity, float)
+    assert isinstance(int_result.remaining_quantity, float)
+
+
+def test_result_event_id_stable_across_int_float():
+    # The digest behind EXECUTION_RESULT event IDs must not depend on
+    # int/float spelling of the same fill.
+    from atlab.coordinator import ExecutionCoordinator
+
+    int_result = BrokerOrderResult(
+        accepted=True, broker_order_id="b1", status=BrokerOrderStatus.FILLED,
+        message="ok", filled_quantity=10, remaining_quantity=0,
+    )
+    float_result = BrokerOrderResult(
+        accepted=True, broker_order_id="b1", status=BrokerOrderStatus.FILLED,
+        message="ok", filled_quantity=10.0, remaining_quantity=0.0,
+    )
+    assert ExecutionCoordinator._result_event_id(
+        "EXECUTION_RESULT", "k", int_result
+    ) == ExecutionCoordinator._result_event_id(
+        "EXECUTION_RESULT", "k", float_result
+    )

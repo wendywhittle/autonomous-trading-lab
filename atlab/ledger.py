@@ -81,8 +81,52 @@ class ImmutableLedger:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger_identity (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                ledger_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         self._ensure_hash_chain(connection)
+        self._ensure_identity(connection)
         return connection
+
+    @staticmethod
+    def _ensure_identity(connection: sqlite3.Connection) -> str:
+        """Create the genesis identity record for a new database, if absent.
+
+        The identity binds companion state files (e.g. portfolio.json) to
+        this specific database file. If the file is deleted and recreated,
+        the new database gets a different identity, and loading the old
+        companion state fails closed (LEDGER_IDENTITY_MISMATCH) instead of
+        silently restarting history at sequence 0.
+        """
+        row = connection.execute(
+            "SELECT ledger_id FROM ledger_identity WHERE id = 1"
+        ).fetchone()
+        if row is not None:
+            return row[0]
+        import secrets
+
+        ledger_id = secrets.token_hex(16)
+        connection.execute(
+            "INSERT INTO ledger_identity (id, ledger_id, created_at) "
+            "VALUES (1, ?, ?)",
+            (ledger_id, datetime.now(UTC).isoformat()),
+        )
+        return ledger_id
+
+    @property
+    def identity(self) -> str:
+        """Return this database's genesis identity, creating it if needed."""
+        connection = self._connect()
+        try:
+            return self._ensure_identity(connection)
+        finally:
+            connection.close()
 
     def _ensure_hash_chain(self, connection: sqlite3.Connection) -> None:
         """Migrate pre-chain databases and (re)build the hash chain if needed."""
