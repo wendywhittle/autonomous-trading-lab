@@ -58,3 +58,101 @@ def test_compliance_engine_rejects_runtime_policy_mutation():
         engine.policy = CompliancePolicy(policy_id="p", version="2")
 
     assert engine.policy.version == "1"
+
+
+# --- H14: reason-asserting tests for every compliance deny branch. ---
+
+def test_restricted_symbol_is_blocked():
+    engine = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="p", version="1", restricted_symbols=frozenset({"TEST"})
+        )
+    )
+    decision = engine.evaluate(request(), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_SYMBOL_RESTRICTED"
+
+
+def test_symbol_outside_allow_list_is_blocked():
+    engine = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="p", version="1", allowed_symbols=frozenset({"AAA"})
+        )
+    )
+    decision = engine.evaluate(request(), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_SYMBOL_NOT_ALLOWED"
+
+
+def test_disallowed_side_is_blocked():
+    engine = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="p", version="1", allowed_sides=frozenset({Side.SELL})
+        )
+    )
+    decision = engine.evaluate(request(), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_SIDE_NOT_ALLOWED"
+
+
+def test_non_finite_quantity_is_blocked():
+    engine = ComplianceEngine(CompliancePolicy(policy_id="p", version="1"))
+    decision = engine.evaluate(
+        request(quantity=float("inf")), BrokerMode.PAPER
+    )
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_INVALID_QUANTITY"
+
+
+def test_non_finite_price_is_blocked():
+    engine = ComplianceEngine(CompliancePolicy(policy_id="p", version="1"))
+    decision = engine.evaluate(request(price=float("inf")), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_INVALID_PRICE"
+
+
+def test_missing_reference_price_is_blocked():
+    engine = ComplianceEngine(CompliancePolicy(policy_id="p", version="1"))
+    decision = engine.evaluate(request(price=None), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_REFERENCE_PRICE_REQUIRED"
+
+
+def test_reference_price_satisfies_price_requirement():
+    engine = ComplianceEngine(CompliancePolicy(policy_id="p", version="1"))
+    priced = BrokerOrderRequest(
+        idempotency_key="compliance-ref",
+        symbol="TEST",
+        side=Side.BUY,
+        quantity=1,
+        price=None,
+        reference_price=100,
+    )
+    decision = engine.evaluate(priced, BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.ALLOW
+    assert decision.reason == "COMPLIANCE_ALLOWED"
+
+
+def test_order_notional_limit_is_blocked():
+    engine = ComplianceEngine(
+        CompliancePolicy(policy_id="p", version="1", max_order_notional=1000)
+    )
+    decision = engine.evaluate(
+        request(quantity=20, price=100), BrokerMode.PAPER
+    )
+    assert decision.action is ComplianceAction.BLOCK
+    assert decision.reason == "COMPLIANCE_ORDER_NOTIONAL_LIMIT"
+
+
+def test_allow_list_permits_matching_symbol_and_side():
+    engine = ComplianceEngine(
+        CompliancePolicy(
+            policy_id="p",
+            version="1",
+            allowed_symbols=frozenset({"TEST"}),
+            allowed_sides=frozenset({Side.BUY}),
+        )
+    )
+    decision = engine.evaluate(request(), BrokerMode.PAPER)
+    assert decision.action is ComplianceAction.ALLOW
+    assert decision.reason == "COMPLIANCE_ALLOWED"

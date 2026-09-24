@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from atlab.cli import main
 
@@ -57,3 +60,69 @@ def test_cli_backtest_rejects_bad_csv(tmp_path, capsys):
     )
     assert code == 2
     assert "CSV_MISSING_COLUMNS" in capsys.readouterr().err
+
+
+# --- H9: the `promote` command evaluates real, locally-verified evidence. ---
+
+
+@pytest.mark.promote_cli
+def test_cli_promote_paper_reports_eligible(tmp_path, capsys):
+    csv_path = make_csv(tmp_path)
+    workdir = tmp_path / "promote-wd"
+    assert (
+        main(["run", "--csv", csv_path, "--symbol", "AAA", "--workdir", str(workdir)])
+        == 0
+    )
+    code = main(
+        [
+            "promote",
+            "--target",
+            "paper",
+            "--csv",
+            csv_path,
+            "--symbol",
+            "AAA",
+            "--workdir",
+            str(workdir),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "target=PAPER eligible=True" in out
+    assert "PROMOTION_ELIGIBLE:paper" in out
+    record = json.loads((workdir / "promotion_record.json").read_text(encoding="utf-8"))
+    assert record["eligible"] is True
+    assert record["target"] == "PAPER"
+    assert record["evidence"]["tests_green"]["provenance"] == "verified"
+    assert record["evidence"]["kill_switch_verified"]["value"] is True
+
+
+@pytest.mark.promote_cli
+def test_cli_promote_live_refuses_without_live_controls(tmp_path, capsys):
+    csv_path = make_csv(tmp_path)
+    workdir = tmp_path / "promote-live-wd"
+    code = main(
+        [
+            "promote",
+            "--target",
+            "live",
+            "--csv",
+            csv_path,
+            "--symbol",
+            "AAA",
+            "--workdir",
+            str(workdir),
+            "--attest-human-approval",
+            "Test Operator <test>: end-to-end check",
+        ]
+    )
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "target=LIVE eligible=False" in out
+    assert "LIVE_EXECUTION_NOT_IMPLEMENTED" in out
+    record = json.loads((workdir / "promotion_record.json").read_text(encoding="utf-8"))
+    assert record["eligible"] is False
+    # Attested-but-unverified evidence stays explicit in the record.
+    assert record["evidence"]["human_approval"]["provenance"] == "attested"
+    assert record["evidence"]["human_approval"]["value"] is True
+    assert record["evidence"]["live_execution_implemented"]["provenance"] == "verified"

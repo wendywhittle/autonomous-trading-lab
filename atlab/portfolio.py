@@ -29,7 +29,7 @@ class PaperPortfolio:
         self._applied_order_ids: set[str] = set()
 
     def apply(self, order: PaperOrder) -> PortfolioSnapshot:
-        if order.order_id in self._applied_order_ids:
+        if self.has_applied_order(order.order_id):
             return self.snapshot(order.fill_price)
 
         if order.side is Side.BUY:
@@ -52,6 +52,15 @@ class PaperPortfolio:
 
         self._applied_order_ids.add(order.order_id)
         return self.snapshot(order.fill_price)
+
+    def has_applied_order(self, order_id: str) -> bool:
+        """Return whether the fill for ``order_id`` is already applied.
+
+        Used by crash recovery (H6): portfolio state is persisted before the
+        ORDER event is appended, so on restart an applied-but-unlogged fill
+        must be backfilled, never re-executed.
+        """
+        return order_id in self._applied_order_ids
 
     def state(self) -> dict:
         return {

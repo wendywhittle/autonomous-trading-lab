@@ -116,6 +116,11 @@ class PaperTradingEngine:
         results: list[CycleResult] = []
 
         for index in range(1, len(observations)):
+            # H1/H7: the kill switch is global. Any KILL_SWITCH event in the
+            # ledger halts the loop at the next cycle boundary; halting no
+            # longer depends on kill events being scoped to one decision.
+            if self.ledger.has_event_type("KILL_SWITCH"):
+                raise RuntimeError("KILL_SWITCH_ACTIVE")
             state = build_state(
                 observations[: index + 1],
                 as_of=observations[index].timestamp,
@@ -173,8 +178,6 @@ class PaperTradingEngine:
 
             if "ORDER" in event_types or "RISK_BLOCK" in event_types:
                 continue
-            if "KILL_SWITCH" in event_types:
-                raise RuntimeError("KILL_SWITCH_ACTIVE")
 
             price = state.price
             pre_trade_snapshot = self.portfolio.snapshot(price)
@@ -195,15 +198,31 @@ class PaperTradingEngine:
                 )
 
             current_position_notional = self.portfolio.position_quantity * price
-            risk_result = self.risk.evaluate(
-                decision,
-                price,
-                self.quantity,
-                current_position_notional,
-                equity=pre_trade_snapshot.equity,
-                session_start_equity=self.risk_session.session_start_equity,
-                high_water_mark=self.risk_session.high_water_mark,
-            )
+            persisted_evaluation = self._risk_evaluation_for(decision)
+            if persisted_evaluation is None:
+                # H6: persist the risk outcome BEFORE any state mutation, so a
+                # crash later in the cycle resumes from the recorded outcome
+                # instead of re-evaluating against already-mutated state.
+                fresh_result = self.risk.evaluate(
+                    decision,
+                    price,
+                    self.quantity,
+                    current_position_notional,
+                    equity=pre_trade_snapshot.equity,
+                    session_start_equity=self.risk_session.session_start_equity,
+                    high_water_mark=self.risk_session.high_water_mark,
+                )
+                self._append_risk_evaluation(
+                    decision,
+                    approved=fresh_result.approved,
+                    reason=fresh_result.reason,
+                )
+                risk_approved, risk_reason = (
+                    fresh_result.approved,
+                    fresh_result.reason,
+                )
+            else:
+                risk_approved, risk_reason = persisted_evaluation
             order = None
 
             if "DECISION" not in event_types:
@@ -222,39 +241,41 @@ class PaperTradingEngine:
                     event_types = {event.event_type for event in decision_events}
                     if "ORDER" in event_types or "RISK_BLOCK" in event_types:
                         continue
-                    if "KILL_SWITCH" in event_types:
-                        raise RuntimeError("KILL_SWITCH_ACTIVE")
 
-            if risk_result.approved:
-                try:
-                    order = self.execution.submit(decision, self.quantity, price)
-                except RuntimeError as exc:
-                    if str(exc) == "KILL_SWITCH_ACTIVE":
-                        self.ledger.append(
-                            "KILL_SWITCH",
-                            f"kill-{decision.decision_id}",
-                            {"decision_id": decision.decision_id, "reason": str(exc)},
-                        )
-                    raise
-
-                snapshot = self.portfolio.apply(order)
-                equity = snapshot.equity
-                self.risk_session = RiskSessionState(
-                    session_start_equity=self.risk_session.session_start_equity,
-                    high_water_mark=max(self.risk_session.high_water_mark, equity),
-                    current_equity=equity,
-                )
-                self._persist_state()
-
-                try:
-                    self.ledger.append(
-                        "ORDER",
-                        order.order_id,
-                        order.model_dump(mode="json"),
-                    )
-                except ValueError as exc:
-                    if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+            if risk_approved:
+                order_id = f"paper-{decision.decision_id}"
+                if self.portfolio.has_applied_order(order_id):
+                    # H6: the fill was applied and portfolio state was
+                    # persisted, but the crash happened before the ORDER event
+                    # was appended. Backfill the ORDER event from the
+                    # deterministic order instead of re-executing and
+                    # double-applying the fill.
+                    order = self._reconstruct_applied_order(decision, price)
+                    self._append_order_event(order)
+                    equity = self.portfolio.snapshot(price).equity
+                    self._persist_state()
+                else:
+                    try:
+                        order = self.execution.submit(decision, self.quantity, price)
+                    except RuntimeError as exc:
+                        if str(exc) == "KILL_SWITCH_ACTIVE":
+                            self.ledger.append(
+                                "KILL_SWITCH",
+                                f"kill-{decision.decision_id}",
+                                {"decision_id": decision.decision_id, "reason": str(exc)},
+                            )
                         raise
+
+                    snapshot = self.portfolio.apply(order)
+                    equity = snapshot.equity
+                    self.risk_session = RiskSessionState(
+                        session_start_equity=self.risk_session.session_start_equity,
+                        high_water_mark=max(self.risk_session.high_water_mark, equity),
+                        current_equity=equity,
+                    )
+                    self._persist_state()
+
+                    self._append_order_event(order)
             else:
                 equity = pre_trade_snapshot.equity
                 self.ledger.append(
@@ -262,7 +283,7 @@ class PaperTradingEngine:
                     f"risk-{decision.decision_id}",
                     {
                         "decision_id": decision.decision_id,
-                        "reason": risk_result.reason,
+                        "reason": risk_reason,
                     },
                 )
                 self.risk_session = RiskSessionState(
@@ -276,9 +297,68 @@ class PaperTradingEngine:
                 CycleResult(
                     decision=decision,
                     order=order,
-                    risk_reason=risk_result.reason,
+                    risk_reason=risk_reason,
                     equity=equity,
                 )
             )
 
         return tuple(results)
+
+    # -- H6 crash-recovery helpers -------------------------------------
+    def _risk_evaluation_for(self, decision) -> tuple[bool, str] | None:
+        """Return the persisted (approved, reason) for a decision, if any."""
+        for event in self.ledger.events_for_decision(decision.decision_id):
+            if event.event_type == "RISK_EVALUATION":
+                payload = event.payload
+                return (bool(payload["approved"]), str(payload["reason"]))
+        return None
+
+    def _append_risk_evaluation(
+        self, decision, *, approved: bool, reason: str
+    ) -> None:
+        try:
+            self.ledger.append(
+                "RISK_EVALUATION",
+                f"risk-eval-{decision.decision_id}",
+                {
+                    "decision_id": decision.decision_id,
+                    "approved": approved,
+                    "reason": reason,
+                },
+            )
+        except ValueError as exc:
+            if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                raise
+            # Another writer recorded the outcome first; the deterministic
+            # risk engine produces the same outcome for the same inputs, so
+            # the caller's freshly computed outcome remains valid.
+
+    def _append_order_event(self, order: PaperOrder) -> None:
+        try:
+            self.ledger.append(
+                "ORDER",
+                order.order_id,
+                order.model_dump(mode="json"),
+            )
+        except ValueError as exc:
+            if str(exc) != "LEDGER_EVENT_ID_EXISTS":
+                raise
+
+    def _reconstruct_applied_order(self, decision, price: float) -> PaperOrder:
+        """Rebuild the exact order ``PaperExecution.submit`` produced.
+
+        The paper fill is deterministic in (decision, quantity, price), so
+        an order applied before a crash can be reconstructed bit-for-bit for
+        ORDER backfill without re-executing.
+        """
+        quantity = self.quantity
+        return PaperOrder(
+            order_id=f"paper-{decision.decision_id}",
+            decision_id=decision.decision_id,
+            symbol=decision.symbol,
+            side=decision.side,
+            quantity=quantity,
+            fill_price=price,
+            notional=quantity * price,
+            status="FILLED",
+        )

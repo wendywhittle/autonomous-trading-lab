@@ -1,5 +1,7 @@
 from datetime import UTC
 
+import pytest
+
 from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
@@ -113,3 +115,51 @@ def test_live_authorization_requires_freshness_fields():
         evidence_fingerprint=authorization.evidence_fingerprint,
     )
     assert not PromotionGate.validate_authorization(tampered)
+
+
+# --- H2: HMAC signing-key fail-closed behavior. ---
+
+def test_authorize_fails_closed_without_signing_key(monkeypatch):
+    monkeypatch.delenv("ATLAB_AUTH_SIGNING_KEY")
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    with pytest.raises(
+        RuntimeError, match="EXECUTION_AUTHORIZATION_SIGNING_KEY_MISSING"
+    ):
+        PromotionGate().authorize(approved, PromotionMode.LIVE)
+
+
+def test_validate_fails_closed_without_signing_key(monkeypatch):
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE)
+    assert PromotionGate.validate_authorization(authorization)
+
+    monkeypatch.delenv("ATLAB_AUTH_SIGNING_KEY")
+    assert not PromotionGate.validate_authorization(authorization)
+
+
+def test_validate_rejects_signature_from_wrong_key(monkeypatch):
+    approved = evidence(
+        no_live_credentials=False,
+        live_credentials_configured=True,
+        live_execution_implemented=True,
+        live_controls_verified=True,
+        human_approval=True,
+    )
+    authorization = PromotionGate().authorize(approved, PromotionMode.LIVE)
+    assert PromotionGate.validate_authorization(authorization)
+
+    # Forged under a different key: the signature no longer verifies.
+    monkeypatch.setenv("ATLAB_AUTH_SIGNING_KEY", "a-different-key")
+    assert not PromotionGate.validate_authorization(authorization)

@@ -343,3 +343,392 @@ def test_live_requires_distinct_decision_identity(tmp_path):
         coordinator.submit(bad, evidence)
 
     assert broker.submissions == 0
+
+
+# --- H12: parametrized LIVE risk-binding mutation tests (end-to-end via
+# submit, asserting the specific reason and zero broker submissions). ---
+
+def _sell_request(original):
+    return BrokerOrderRequest(
+        idempotency_key=original.idempotency_key,
+        symbol=original.symbol,
+        side=Side.SELL,
+        quantity=original.quantity,
+        price=original.price,
+        decision_id=original.decision_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_reason"),
+    [
+        (
+            lambda original: request(symbol="EVIL", decision_id=original.decision_id),
+            "RISK_SYMBOL_CONFLICT",
+        ),
+        (
+            lambda original: request(decision_id="decision-tampered"),
+            "RISK_DECISION_ID_CONFLICT",
+        ),
+        (
+            _sell_request,
+            "RISK_SIDE_CONFLICT",
+        ),
+        (
+            lambda original: request(quantity=2, decision_id=original.decision_id),
+            "RISK_QUANTITY_CONFLICT",
+        ),
+        (
+            lambda original: request(price=101, decision_id=original.decision_id),
+            "RISK_PRICE_CONFLICT",
+        ),
+        (
+            lambda original: request(decision_id=""),
+            "LIVE_DECISION_ID_REQUIRED",
+        ),
+        (
+            lambda original: request(decision_id=original.idempotency_key),
+            "LIVE_DECISION_ID_REQUIRED",
+        ),
+        (
+            lambda original: request(price=None, reference_price=None),
+            "LIVE_MARKET_ORDER_REFERENCE_PRICE_REQUIRED",
+        ),
+    ],
+)
+def test_live_risk_binding_mutations_are_rejected_before_broker(
+    tmp_path, mutate, expected_reason
+):
+    coordinator, store, _, broker, snapshot = make_coordinator(tmp_path)
+    original = request()
+    evidence = risk_for(original, snapshot)
+    mutated = mutate(original)
+
+    with pytest.raises(RuntimeError, match=expected_reason):
+        coordinator.submit(mutated, evidence)
+
+    assert broker.submissions == 0
+    assert store.get(mutated.idempotency_key) is None
+
+
+def test_live_risk_evidence_without_state_fingerprint_is_rejected(tmp_path):
+    coordinator, store, _, broker, snapshot = make_coordinator(tmp_path)
+    original = request()
+    # No risk_state passed: the signed evidence carries no state fingerprint.
+    evidence = DeterministicRiskEngine().evaluate(
+        JEVDecision(
+            decision_id=original.decision_id,
+            strategy_id="test-strategy",
+            strategy_version="1",
+            symbol=original.symbol,
+            action=DecisionAction.ENTER,
+            side=original.side,
+            confidence=1,
+            rationale="test",
+            state_fingerprint="state-1",
+            created_at=datetime.now(UTC),
+        ),
+        original.price,
+        original.quantity,
+        snapshot.current_position_notional,
+        equity=snapshot.equity,
+        session_start_equity=snapshot.session_start_equity,
+        high_water_mark=snapshot.high_water_mark,
+        available_cash=snapshot.available_cash,
+    )
+
+    with pytest.raises(RuntimeError, match="RISK_STATE_EVIDENCE_REQUIRED"):
+        coordinator.submit(original, evidence)
+
+    assert broker.submissions == 0
+    assert store.get(original.idempotency_key) is None
+
+
+def test_live_hold_evidence_is_not_executable(tmp_path):
+    coordinator, store, _, broker, snapshot = make_coordinator(tmp_path)
+    original = request()
+    # Synthetic approved+HOLD evidence: the engine never approves HOLD, so a
+    # directly-signed artifact exercises the defense-in-depth branch.
+    hold_jev = JEVDecision(
+        decision_id=original.decision_id,
+        strategy_id="test-strategy",
+        strategy_version="1",
+        symbol=original.symbol,
+        action=DecisionAction.HOLD,
+        side=original.side,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state-1",
+        created_at=datetime.now(UTC),
+    )
+    hold_evidence = DeterministicRiskEngine()._result(
+        hold_jev,
+        original.price,
+        original.quantity,
+        snapshot.current_position_notional,
+        True,
+        "APPROVED",
+        2500,
+        equity=snapshot.equity,
+        session_start_equity=snapshot.session_start_equity,
+        high_water_mark=snapshot.high_water_mark,
+        available_cash=snapshot.available_cash,
+        risk_state_fingerprint=snapshot.fingerprint(),
+    )
+
+    with pytest.raises(RuntimeError, match="RISK_HOLD_NOT_EXECUTABLE"):
+        coordinator.submit(original, hold_evidence)
+
+    assert broker.submissions == 0
+    assert store.get(original.idempotency_key) is None
+
+
+def test_live_tampered_risk_evidence_is_rejected_before_broker(tmp_path):
+    coordinator, store, _, broker, snapshot = make_coordinator(tmp_path)
+    original = request()
+    evidence = risk_for(original, snapshot)
+    tampered = evidence.model_copy(update={"quantity": 2})
+
+    with pytest.raises(RuntimeError, match="RISK_EVIDENCE_TAMPERED"):
+        coordinator.submit(original, tampered)
+
+    assert broker.submissions == 0
+    assert store.get(original.idempotency_key) is None
+
+
+# --- H15: revocation during provider uncertainty is blocked. ---
+
+class UncertainLiveBroker(CountingLiveBroker):
+    """Broker that drops the connection at submit time: the order may or may
+    not exist provider-side, so the outcome is genuinely unknown."""
+
+    def submit(self, request):
+        self.submissions += 1
+        raise ConnectionError("PROVIDER_TIMEOUT")
+
+
+def test_revocation_is_blocked_during_provider_uncertainty(tmp_path):
+    coordinator, store, _, broker, snapshot = make_coordinator(
+        tmp_path, broker=UncertainLiveBroker()
+    )
+    req = request()
+    attempt = coordinator.submit(req, risk_for(req, snapshot))
+    assert broker.submissions == 1
+
+    # The broker was contacted but the outcome is unknown: the intent holds an
+    # UNKNOWN-status result. Revoking now could orphan a live order.
+    from atlab.coordinator import IntentStatus
+
+    assert attempt.status is IntentStatus.UNKNOWN
+    intent = store.get(req.idempotency_key)
+    assert intent is not None and intent.result is not None
+
+    with pytest.raises(
+        RuntimeError,
+        match="EXECUTION_AUTHORIZATION_REVOCATION_BLOCKED_BY_ACTIVE_AUTHORITY",
+    ):
+        coordinator.revoke_execution_authorization("operator-uncertain")
+
+    # The authorization stays active; revocation did not go through.
+    assert store.authorization_is_active(coordinator.authorization.authorization_id)
+
+
+def test_revocation_succeeds_once_outcome_is_known(tmp_path):
+    coordinator, store, _, _broker, snapshot = make_coordinator(tmp_path)
+    req = request()
+    coordinator.submit(req, risk_for(req, snapshot))
+    store.update_result(
+        req.idempotency_key,
+        BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.FILLED,
+            message="FILLED",
+            filled_quantity=req.quantity,
+            remaining_quantity=0,
+        ),
+    )
+
+    coordinator.revoke_execution_authorization("operator-known")
+
+    assert not store.authorization_is_active(
+        coordinator.authorization.authorization_id
+    )
+
+
+# --- H4: atomic LIVE aggregate risk-state updates on fills. ---
+
+class ScriptedFillBroker(CountingLiveBroker):
+    """LIVE broker returning a scripted result per submission."""
+
+    def __init__(self, results):
+        super().__init__()
+        self._results = list(results)
+
+    def submit(self, request):
+        self.submissions += 1
+        return self._results[self.submissions - 1]
+
+
+def _fill_result(filled, remaining, status=BrokerOrderStatus.FILLED):
+    return BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=status,
+        message="FILL",
+        filled_quantity=filled,
+        remaining_quantity=remaining,
+    )
+
+
+def _live_risk_state(store):
+    snapshot, version = store.get_live_risk_state()
+    return snapshot, version
+
+
+def test_live_full_buy_fill_updates_aggregate_risk_state(tmp_path):
+    broker = ScriptedFillBroker([_fill_result(1, 0)])
+    coordinator, store, _, _, snapshot = make_coordinator(tmp_path, broker=broker)
+    _, initial_version = _live_risk_state(store)
+    req = request()
+    coordinator.submit(req, risk_for(req, snapshot))
+
+    updated, version = _live_risk_state(store)
+    assert updated.current_position_notional == 100
+    assert updated.available_cash == 900
+    assert version == initial_version + 1
+    assert broker.submissions == 1
+
+
+def test_live_incremental_partial_fills_apply_delta_only(tmp_path):
+    broker = ScriptedFillBroker(
+        [_fill_result(0.4, 0.6, BrokerOrderStatus.PARTIALLY_FILLED)]
+    )
+    coordinator, store, _, _, snapshot = make_coordinator(tmp_path, broker=broker)
+    req = request()
+    coordinator.submit(req, risk_for(req, snapshot))
+
+    partial, _ = _live_risk_state(store)
+    assert partial.current_position_notional == pytest.approx(40)
+    assert partial.available_cash == pytest.approx(960)
+
+    # Cumulative fill of 1.0: only the 0.6 delta is applied, not the full 1.0.
+    coordinator._commit_result(
+        req.idempotency_key, _fill_result(1.0, 0), "EXECUTION_RESULT"
+    )
+    final, _ = _live_risk_state(store)
+    assert final.current_position_notional == pytest.approx(100)
+    assert final.available_cash == pytest.approx(900)
+
+
+def test_live_sell_fill_reduces_position_and_restores_cash(tmp_path):
+    broker = ScriptedFillBroker([_fill_result(1, 0)])
+    coordinator, store, _, _, _ = make_coordinator(tmp_path, broker=broker)
+    funded = state(position=500, cash=500, equity=1000)
+    store.mutate_live_risk_state(funded, 0)
+
+    sell_jev = JEVDecision(
+        decision_id="decision-sell-1",
+        strategy_id="test-strategy",
+        strategy_version="1",
+        symbol="TEST",
+        action=DecisionAction.EXIT,
+        side=Side.SELL,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state-1",
+        created_at=datetime.now(UTC),
+    )
+    sell_risk = DeterministicRiskEngine().evaluate(
+        sell_jev, 100, 1, funded.current_position_notional,
+        equity=funded.equity,
+        session_start_equity=funded.session_start_equity,
+        high_water_mark=funded.high_water_mark,
+        available_cash=funded.available_cash,
+        risk_state=funded,
+    )
+    assert sell_risk.approved
+    sell_req = BrokerOrderRequest(
+        idempotency_key="risk-sell-1",
+        symbol="TEST",
+        side=Side.SELL,
+        quantity=1,
+        price=100,
+        decision_id="decision-sell-1",
+    )
+    coordinator.submit(sell_req, sell_risk)
+
+    updated, _ = _live_risk_state(store)
+    assert updated.current_position_notional == 400
+    assert updated.available_cash == 600
+    assert broker.submissions == 1
+
+
+def test_live_fill_rolls_back_atomically_on_risk_state_corruption(tmp_path):
+    broker = ScriptedFillBroker(
+        [BrokerOrderResult(accepted=True, broker_order_id="broker-1",
+                           status=BrokerOrderStatus.ACCEPTED, message="ACCEPTED")]
+    )
+    coordinator, store, ledger, _, snapshot = make_coordinator(
+        tmp_path, broker=broker
+    )
+    before, initial_version = _live_risk_state(store)
+    req = request()
+    coordinator.submit(req, risk_for(req, snapshot))
+
+    connection = store._connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE live_risk_state SET fingerprint = ? WHERE id = 1", ("corrupt",)
+        )
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+
+    result_events_before = [
+        event for event in ledger.read() if event.event_type == "EXECUTION_RESULT"
+    ]
+    assert len(result_events_before) == 1  # the ACCEPTED result from submit
+
+    with pytest.raises(RuntimeError, match="LIVE_RISK_STATE_CORRUPT"):
+        coordinator._commit_result(
+            req.idempotency_key, _fill_result(1, 0), "EXECUTION_RESULT"
+        )
+
+    # Atomic rollback: the fill result was not committed, the risk-state row
+    # is untouched by the failed commit, and no second ledger result event
+    # was appended.
+    intent = store.get(req.idempotency_key)
+    assert intent.result.status is BrokerOrderStatus.ACCEPTED
+    row = store._connect().execute(
+        "SELECT current_position_notional, available_cash, version "
+        "FROM live_risk_state WHERE id = 1"
+    ).fetchone()
+    assert tuple(row) == (
+        before.current_position_notional,
+        before.available_cash,
+        initial_version,
+    )
+    result_events_after = [
+        event for event in ledger.read() if event.event_type == "EXECUTION_RESULT"
+    ]
+    assert [e.event_id for e in result_events_after] == [
+        e.event_id for e in result_events_before
+    ]
+
+
+def test_paper_fill_does_not_touch_live_risk_state(tmp_path):
+    broker = ScriptedFillBroker([_fill_result(1, 0)])
+    broker.mode = BrokerMode.PAPER
+    db = tmp_path / "paper.sqlite3"
+    store = ExecutionIntentStore(db)
+    ledger = ImmutableLedger(db)
+    instance = ExecutionCoordinator(store, broker, ledger)
+    req = BrokerOrderRequest(
+        idempotency_key="paper-1", symbol="TEST", side=Side.BUY, quantity=1, price=100
+    )
+    instance.submit(req)
+
+    with pytest.raises(RuntimeError, match="LIVE_RISK_STATE_NOT_INITIALIZED"):
+        store.get_live_risk_state()

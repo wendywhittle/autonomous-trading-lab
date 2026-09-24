@@ -49,8 +49,12 @@ def test_paper_engine_runs_end_to_end(tmp_path):
     assert results[-1].equity == 1002
     assert results[-1].order.fill_price == 102
     assert [event.event_type for event in engine.ledger.read()] == [
+        # H6: the risk outcome is persisted before execution so a crash
+        # later in the cycle can resume from the recorded outcome.
+        "RISK_EVALUATION",
         "DECISION",
         "ORDER",
+        "RISK_EVALUATION",
         "DECISION",
         "ORDER",
     ]
@@ -237,7 +241,9 @@ def test_paper_engine_recovers_incomplete_decision_after_restart(tmp_path):
     assert len(results) == 2
     assert results[0].order is not None
     assert engine.portfolio.position_quantity == 2
-    assert len(ledger.read()) == 4
+    # 1 pre-existing DECISION + (RISK_EVALUATION + ORDER) for cycle 1 +
+    # (RISK_EVALUATION + DECISION + ORDER) for cycle 2.
+    assert len(ledger.read()) == 6
 
     restarted = PaperTradingEngine(
         InMemoryMarketData(observations),
@@ -373,3 +379,139 @@ def test_risk_engine_rejects_action_side_mismatch():
     result = DeterministicRiskEngine().evaluate(decision, 100, 1)
     assert not result.approved
     assert result.reason == "INVALID_DECISION_SIDE"
+
+
+# --- H1/H7: the kill switch is global; any KILL_SWITCH event halts the loop. ---
+
+def test_engine_halts_when_kill_switch_event_already_present(tmp_path):
+    adapter = InMemoryMarketData([obs(100, 1), obs(101, 2), obs(102, 3)])
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    ledger.append("KILL_SWITCH", "kill-manual-1", {"reason": "operator halt"})
+    engine = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+        quantity=2,
+    )
+
+    with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
+        engine.run("TEST")
+
+
+def test_engine_halts_at_next_boundary_after_kill_event(tmp_path):
+    adapter = InMemoryMarketData([obs(100, 1), obs(101, 2), obs(102, 3)])
+    ledger_path = tmp_path / "ledger.sqlite3"
+    engine = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(ledger_path),
+        quantity=2,
+    )
+    assert len(engine.run("TEST")) == 2
+
+    # Operator kill between runs: the next run halts at the first boundary,
+    # regardless of which decision the kill was scoped to (H7).
+    ImmutableLedger(ledger_path).append(
+        "KILL_SWITCH", "kill-manual-2", {"reason": "operator halt"}
+    )
+    restarted = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(ledger_path),
+        quantity=2,
+    )
+    with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
+        restarted.run("TEST")
+
+
+def test_armed_kill_switch_halts_engine_and_persists_kill_event(tmp_path):
+    # H1: kill_switch=True arms PaperExecution. The first executable decision
+    # raises, the engine records the KILL_SWITCH event, and every later cycle
+    # (and restart) halts globally.
+    adapter = InMemoryMarketData([obs(100, 1), obs(101, 2), obs(102, 3)])
+    ledger_path = tmp_path / "ledger.sqlite3"
+    engine = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(ledger_path),
+        quantity=2,
+        kill_switch=True,
+    )
+
+    with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
+        engine.run("TEST")
+
+    assert engine.ledger.has_event_type("KILL_SWITCH")
+
+    restarted = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(ledger_path),
+        quantity=2,
+    )
+    with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
+        restarted.run("TEST")
+
+
+# --- H6: crash between portfolio persist and ORDER append backfills. ---
+
+def test_crash_between_portfolio_persist_and_order_append_backfills(tmp_path):
+    from atlab.models import OrderStatus, PaperOrder
+
+    # H6: the fill was applied and the portfolio state persisted, but the
+    # process crashed before the ORDER event was appended. On restart the
+    # engine backfills the ORDER event from the deterministic order without
+    # re-executing or double-applying the fill.
+    observations = [obs(100, 1), obs(101, 2)]
+    portfolio_path = tmp_path / "portfolio.json"
+
+    # The pre-crash cycle: decide and fill exactly as the engine would.
+    pre_crash_state = build_state(observations[:2], as_of=observations[1].timestamp)
+    decision = make_decision(strategy(), pre_crash_state)
+    assert decision.action.value == "ENTER"
+    order = PaperOrder(
+        order_id=f"paper-{decision.decision_id}",
+        decision_id=decision.decision_id,
+        symbol=decision.symbol,
+        side=decision.side,
+        quantity=2,
+        fill_price=101,
+        notional=202,
+        status=OrderStatus.FILLED,
+    )
+    crashed_portfolio = PaperPortfolio(1000)
+    crashed_portfolio.apply(order)
+    crashed_portfolio.save_state(portfolio_path)
+    assert crashed_portfolio.has_applied_order(order.order_id)
+
+    # Restart with the persisted portfolio state and a ledger that never saw
+    # the ORDER event.
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ImmutableLedger(tmp_path / "ledger.sqlite3"),
+        quantity=2,
+        portfolio_state_path=portfolio_path,
+    )
+    results = engine.run("TEST")
+
+    order_events = [e for e in engine.ledger.read() if e.event_type == "ORDER"]
+    assert len(order_events) == 1
+    assert order_events[0].payload["order_id"] == order.order_id
+    assert order_events[0].payload["fill_price"] == 101
+    # No double-apply: exactly one fill of 2 @ 101 against 1000 cash.
+    assert engine.portfolio.cash == pytest.approx(798)
+    assert results[0].order is not None
+    assert results[0].order.order_id == order.order_id

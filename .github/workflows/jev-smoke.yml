@@ -1,15 +1,9 @@
 name: Jev live smoke
 
 on:
+  # Manual only: this workflow makes a real, billable TypeSafe/Jev API call.
+  # It must never run on push/merge; dispatch it explicitly from the Actions tab.
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "atlab/jev.py"
-      - "tests/test_jev_live.py"
-      - "pyproject.toml"
-      - ".github/workflows/jev-smoke.yml"
 
 jobs:
   jev-smoke:
