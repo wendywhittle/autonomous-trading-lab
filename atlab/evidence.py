@@ -29,7 +29,7 @@ from .models import DecisionAction, JEVDecision, Side, StrategyVersion
 from .paper import PaperExecution
 from .portfolio import PaperPortfolio
 from .promotion import PromotionEvidence, PromotionMode
-from .replay import replay
+from .replay import validate_ledger_sequence
 from .risk import DeterministicRiskEngine, RiskLimits
 from .runtime import PaperTradingEngine, TradingMode
 
@@ -156,8 +156,9 @@ def check_replay_deterministic(
                 mode=TradingMode.PAPER,
             )
             cycles = engine.run(symbol)
-            # The persisted ledger must replay cleanly (sequence contiguity).
-            replay(engine.ledger.read())
+            # The persisted ledger must validate cleanly (sequence
+            # contiguity and unique event IDs).
+            validate_ledger_sequence(engine.ledger.read())
             return [
                 (
                     cycle.decision.decision_id,

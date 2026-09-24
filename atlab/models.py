@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Side(str, Enum):
@@ -28,9 +28,19 @@ class MarketObservation(BaseModel):
     symbol: str
     timestamp: datetime
     price: float = Field(gt=0)
-    volume: float = Field(default=0, ge=0)
+    volume: float = Field(default=0.0, ge=0)
     source: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def _normalize_timestamp(cls, value: Any) -> Any:
+        # M13: normalize naive datetimes to UTC-aware so the same instant
+        # always serializes (and therefore fingerprints) identically,
+        # regardless of whether the source supplied an offset.
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class MarketState(BaseModel):

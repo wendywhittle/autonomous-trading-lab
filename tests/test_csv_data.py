@@ -103,3 +103,32 @@ def test_csv_volume_defaults_to_zero(tmp_path):
     )
     (observation,) = CsvMarketData(path).observations("AAA")
     assert observation.volume == 0.0
+
+
+def test_csv_rejects_infinite_price(tmp_path):
+    # M8: float("inf") parses and pydantic's gt=0 accepts it — the adapter
+    # must reject non-finite numerics before they poison returns/equity.
+    path = write_csv(
+        tmp_path / "data.csv",
+        ["timestamp,symbol,open,high,low,close", "2024-01-02T00:00:00+00:00,AAA,100,101,99,inf"],
+    )
+    with pytest.raises(ValueError, match="CSV_NON_FINITE_NUMERIC:close"):
+        CsvMarketData(path)
+
+
+def test_csv_rejects_nan_value(tmp_path):
+    path = write_csv(
+        tmp_path / "data.csv",
+        ["timestamp,symbol,open,high,low,close", "2024-01-02T00:00:00+00:00,AAA,nan,101,99,100"],
+    )
+    with pytest.raises(ValueError, match="CSV_NON_FINITE_NUMERIC:open"):
+        CsvMarketData(path)
+
+
+def test_csv_rejects_infinite_volume(tmp_path):
+    path = write_csv(
+        tmp_path / "data.csv",
+        [HEADER, "2024-01-02T00:00:00+00:00,AAA,100,101,99,100,inf"],
+    )
+    with pytest.raises(ValueError, match="CSV_NON_FINITE_NUMERIC:volume"):
+        CsvMarketData(path)

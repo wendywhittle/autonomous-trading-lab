@@ -61,7 +61,7 @@ def _engine(args: argparse.Namespace, workdir: Path) -> tuple[PaperTradingEngine
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--csv", required=True, help="Path to OHLCV CSV file.")
+    parser.add_argument("--csv", required=True, help="Path to OHLCV CSV file. Naive timestamps are interpreted as UTC.")
     parser.add_argument("--symbol", required=True, help="Symbol to trade.")
     parser.add_argument("--workdir", default="lab-workdir", help="State directory.")
     parser.add_argument("--starting-cash", type=float, default=10_000.0)

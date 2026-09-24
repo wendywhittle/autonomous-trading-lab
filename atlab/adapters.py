@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,11 @@ class CsvMarketData:
     chronological order (ties broken by file row order, so the output is
     stable). Consumers iterate with a historical cutoff, so no future data
     can leak into a state built at an earlier timestamp.
+
+    Timezone handling: timestamps without an explicit offset are interpreted
+    as UTC. This is a silent assumption — a source file recorded in
+    exchange-local time will be shifted by hours with no warning. Convert
+    such files to UTC (or add explicit offsets) before loading.
     """
 
     REQUIRED_COLUMNS = ("timestamp", "symbol", "open", "high", "low", "close")
@@ -84,6 +90,9 @@ class CsvMarketData:
                 numeric[column] = float(str(raw).strip())
             except ValueError as exc:
                 raise ValueError(f"CSV_BAD_NUMERIC:{column}:{label}") from exc
+        for column in ("open", "high", "low", "close", "volume"):
+            if not math.isfinite(numeric[column]):
+                raise ValueError(f"CSV_NON_FINITE_NUMERIC:{column}:{label}")
         if numeric["close"] <= 0:
             raise ValueError(f"CSV_NON_POSITIVE_PRICE:{label}")
         if not (numeric["low"] <= min(numeric["open"], numeric["close"]) <= max(numeric["open"], numeric["close"]) <= numeric["high"]):

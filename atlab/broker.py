@@ -34,6 +34,16 @@ class BrokerOrderRequest:
     decision_id: str | None = None
 
     def __post_init__(self) -> None:
+        # Canonicalize numerics to float so fingerprints and result event
+        # IDs are stable across int/float representations of the same value
+        # (mirrors RiskLimits). Without this, quantity=10 and quantity=10.0
+        # produce different _result_event_id digests and a retried intent
+        # re-committed with flipped types appends a duplicate
+        # EXECUTION_RESULT event.
+        for field in ("quantity", "price", "reference_price"):
+            value = getattr(self, field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                object.__setattr__(self, field, float(value))
         if not self.idempotency_key:
             raise ValueError("INVALID_IDEMPOTENCY_KEY")
         if not self.symbol:
@@ -60,6 +70,12 @@ class BrokerOrderResult:
     def __post_init__(self) -> None:
         import math
 
+        # Canonicalize numerics to float (mirrors BrokerOrderRequest): the
+        # same fill reported as int vs float must digest identically.
+        for field in ("filled_quantity", "remaining_quantity"):
+            value = getattr(self, field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                object.__setattr__(self, field, float(value))
         if (self.filled_quantity is None) != (self.remaining_quantity is None):
             raise ValueError("EXECUTION_FILL_QUANTITY_PAIR_REQUIRED")
         if self.filled_quantity is not None and self.remaining_quantity is not None:

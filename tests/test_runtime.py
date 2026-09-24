@@ -515,3 +515,30 @@ def test_crash_between_portfolio_persist_and_order_append_backfills(tmp_path):
     assert engine.portfolio.cash == pytest.approx(798)
     assert results[0].order is not None
     assert results[0].order.order_id == order.order_id
+
+
+def test_engine_blocks_buy_exceeding_available_cash(tmp_path):
+    # M3: available_cash now flows into risk evaluation. A BUY larger than
+    # cash is blocked with INSUFFICIENT_CASH instead of driving cash
+    # negative.
+    adapter = InMemoryMarketData([obs(100, 1), obs(101, 2)])
+    engine = PaperTradingEngine(
+        adapter,
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(100.0),
+        ImmutableLedger(tmp_path / "ledger.sqlite3"),
+        quantity=2,  # notional 202 > cash 100
+    )
+
+    results = engine.run("TEST")
+
+    assert len(results) == 1
+    assert results[0].order is None
+    assert results[0].risk_reason == "INSUFFICIENT_CASH"
+    assert engine.portfolio.cash == 100.0
+    assert [event.event_type for event in engine.ledger.read()] == [
+        "RISK_EVALUATION",
+        "DECISION",
+        "RISK_BLOCK",
+    ]

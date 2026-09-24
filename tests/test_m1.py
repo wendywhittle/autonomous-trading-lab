@@ -10,7 +10,7 @@ from atlab.models import MarketObservation, StrategyVersion
 from atlab.paper import PaperExecution
 from atlab.portfolio import PaperPortfolio
 from atlab.registry import StrategyRegistry
-from atlab.replay import replay
+from atlab.replay import validate_ledger_sequence
 from atlab.state import build_state
 from atlab.strategy import make_decision
 
@@ -122,4 +122,4 @@ def test_replay_rejects_duplicate_event_ids(tmp_path):
     first = ledger.append("TEST", "event-1", {})
     duplicate = first.model_copy(update={"sequence": 1})
     with pytest.raises(ValueError, match="LEDGER_EVENT_ID_DUPLICATE"):
-        replay([first, duplicate])
+        validate_ledger_sequence([first, duplicate])

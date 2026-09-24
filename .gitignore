@@ -6,3 +6,10 @@ __pycache__/
 .env
 data/*.jsonl
 data/*.sqlite3
+# Trading state must never be committed by accident: the CLI's default
+# workdir (ledger.sqlite3, portfolio.json, risk_session.json), any SQLite
+# database plus WAL sidecars, and build artifacts.
+lab-workdir/
+*.sqlite3*
+*.db*
+*.egg-info/

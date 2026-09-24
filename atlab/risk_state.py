@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,14 @@ class RiskSessionState:
     current_equity: float
 
     def __post_init__(self) -> None:
+        # Canonicalize to float so the fingerprint is stable (mirrors
+        # RiskStateSnapshot).
+        for field in (
+            "session_start_equity",
+            "high_water_mark",
+            "current_equity",
+        ):
+            object.__setattr__(self, field, float(getattr(self, field)))
         if (
             self.session_start_equity < 0
             or self.high_water_mark < 0
@@ -53,6 +62,17 @@ class RiskSessionState:
             or self.high_water_mark < self.current_equity
         ):
             raise ValueError("INVALID_RISK_SESSION_STATE")
+
+    def fingerprint(self) -> str:
+        """Integrity fingerprint over the canonical session fields."""
+        payload = {
+            "session_start_equity": self.session_start_equity,
+            "high_water_mark": self.high_water_mark,
+            "current_equity": self.current_equity,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def save(self, path: str | Path) -> None:
         target = Path(path)
@@ -64,6 +84,10 @@ class RiskSessionState:
                     "current_equity": self.current_equity,
                     "high_water_mark": self.high_water_mark,
                     "session_start_equity": self.session_start_equity,
+                    # M7: integrity fingerprint. A manual edit (e.g. raising
+                    # session_start_equity to hide a drawdown breach) fails
+                    # closed on load instead of passing silently.
+                    "fingerprint": self.fingerprint(),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -75,11 +99,19 @@ class RiskSessionState:
     @classmethod
     def load(cls, path: str | Path) -> RiskSessionState:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        required = {"session_start_equity", "high_water_mark", "current_equity"}
-        if set(data) != required:
-            raise ValueError("INVALID_RISK_SESSION_STATE")
-        return cls(
+        required = {
+            "session_start_equity",
+            "high_water_mark",
+            "current_equity",
+            "fingerprint",
+        }
+        if set(data) != required or not isinstance(data["fingerprint"], str):
+            raise ValueError("RISK_SESSION_STATE_CORRUPT")
+        state = cls(
             session_start_equity=float(data["session_start_equity"]),
             high_water_mark=float(data["high_water_mark"]),
             current_equity=float(data["current_equity"]),
         )
+        if not hmac.compare_digest(data["fingerprint"], state.fingerprint()):
+            raise ValueError("RISK_SESSION_STATE_CORRUPT")
+        return state
