@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -24,7 +23,6 @@ from .execution_reconciliation import (
 from .ledger import ImmutableLedger
 from .promotion import ExecutionAuthorization, PromotionGate, PromotionMode
 from .risk import DeterministicRiskEngine
-from .risk_state import RiskStateSnapshot
 from .models import DecisionAction, RiskDecision
 
 
@@ -53,7 +51,6 @@ class ExecutionCoordinator:
         authorization: ExecutionAuthorization | None = None,
         compliance: ComplianceEngine | None = None,
         risk: DeterministicRiskEngine | None = None,
-        risk_state_provider: Callable[[BrokerOrderRequest], RiskStateSnapshot] | None = None,
     ):
         if store.path.resolve() != ledger.path.resolve():
             raise ValueError("EXECUTION_AND_LEDGER_MUST_SHARE_DATABASE")
@@ -65,7 +62,6 @@ class ExecutionCoordinator:
             CompliancePolicy(policy_id="default", version="1")
         )
         self._risk = risk or DeterministicRiskEngine()
-        self._risk_state_provider = risk_state_provider
 
     @property
     def broker(self) -> BrokerAdapter:
@@ -247,9 +243,10 @@ class ExecutionCoordinator:
                         authorization.issued_at,
                         authorization.expires_at,
                     )
-                _, created = self.store._record_in_connection(
-                    connection, request, authorization_binding, risk_decision
-                )
+                if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
+                    _, created = self.store._acquire_live_execution_authority_in_connection(connection, request, authorization_binding, risk_decision)
+                else:
+                    _, created = self.store._record_in_connection(connection, request, authorization_binding, risk_decision)
                 if created:
                     self.ledger._append_in_connection(
                         connection,
@@ -478,8 +475,6 @@ class ExecutionCoordinator:
             raise RuntimeError("LIVE_RISK_DECISION_REQUIRED")
         if request.decision_id == request.idempotency_key:
             raise RuntimeError("LIVE_DECISION_ID_REQUIRED")
-        if risk_decision.risk_limits_fingerprint != self._risk.limits.fingerprint():
-            raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
         DeterministicRiskEngine.validate_evidence(risk_decision)
         if not risk_decision.risk_state_fingerprint:
             raise RuntimeError("RISK_STATE_EVIDENCE_REQUIRED")
@@ -498,23 +493,6 @@ class ExecutionCoordinator:
             raise RuntimeError("RISK_PRICE_CONFLICT")
         if risk_decision.action is DecisionAction.HOLD:
             raise RuntimeError("RISK_HOLD_NOT_EXECUTABLE")
-        if self._risk_state_provider is None:
-            raise RuntimeError("LIVE_RISK_STATE_PROVIDER_REQUIRED")
-        current = self._risk_state_provider(request)
-        if current.fingerprint() != risk_decision.risk_state_fingerprint:
-            raise RuntimeError("RISK_STATE_CHANGED_AFTER_APPROVAL")
-        if current.symbol != risk_decision.symbol:
-            raise RuntimeError("RISK_STATE_SYMBOL_CONFLICT")
-        if current.current_position_notional != risk_decision.current_position_notional:
-            raise RuntimeError("RISK_STATE_POSITION_CONFLICT")
-        if current.equity != risk_decision.equity:
-            raise RuntimeError("RISK_STATE_EQUITY_CONFLICT")
-        if current.session_start_equity != risk_decision.session_start_equity:
-            raise RuntimeError("RISK_STATE_SESSION_EQUITY_CONFLICT")
-        if current.high_water_mark != risk_decision.high_water_mark:
-            raise RuntimeError("RISK_STATE_HIGH_WATER_MARK_CONFLICT")
-        if current.available_cash != risk_decision.available_cash:
-            raise RuntimeError("RISK_STATE_CASH_CONFLICT")
 
     def prepare(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None = None) -> None:
         live = getattr(self.broker, "mode", BrokerMode.DISABLED) is BrokerMode.LIVE
@@ -548,32 +526,25 @@ class ExecutionCoordinator:
                 existing.result,
             )
 
-        # Re-check authoritative risk state immediately before the external side effect.
         if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
-            self._validate_live_risk(request, risk_decision)
-
-        # Re-check LIVE authorization after all deterministic preparation and
-        # immediately before the external side effect.
-        authorization = self._require_execution_authorization()
-        if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
-            if authorization is None:
-                raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
-            if existing.risk_fingerprint != risk_decision.risk_fingerprint:
-                raise RuntimeError("EXECUTION_INTENT_RISK_CONFLICT")
-            expected_binding = (
-                authorization.authorization_id,
-                PromotionGate.authorization_fingerprint(authorization),
-                authorization.issued_at,
-                authorization.expires_at,
-            )
-            actual_binding = (
-                existing.authorization_id,
-                existing.authorization_fingerprint,
-                existing.authorization_issued_at,
-                existing.authorization_expires_at,
-            )
-            if actual_binding != expected_binding:
-                raise RuntimeError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
+            authorization = self._require_execution_authorization()
+            if authorization is None: raise RuntimeError("EXECUTION_AUTHORIZATION_REQUIRED")
+            connection = self._transaction()
+            try:
+                current, _ = self.store._acquire_live_execution_authority_in_connection(
+                    connection, request,
+                    (authorization.authorization_id, PromotionGate.authorization_fingerprint(authorization), authorization.issued_at, authorization.expires_at),
+                    risk_decision,
+                )
+                if current.idempotency_key != existing.idempotency_key: raise RuntimeError("EXECUTION_AUTHORITY_CONFLICT")
+                connection.execute("COMMIT")
+            except Exception:
+                try: connection.execute("ROLLBACK")
+                finally: connection.close()
+                raise
+            else:
+                connection.close()
+                existing = current
 
         try:
             result = self.broker.submit(request)

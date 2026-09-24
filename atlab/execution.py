@@ -7,6 +7,8 @@ from pathlib import Path
 
 from .broker import BrokerOrderRequest, BrokerOrderResult, BrokerOrderStatus
 from .models import RiskDecision, Side
+from .risk import RiskLimits
+from .risk_state import RiskStateSnapshot
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,10 @@ class ExecutionIntent:
     authorization_expires_at: str | None = None
     risk_decision: RiskDecision | None = None
     risk_fingerprint: str | None = None
+    risk_state_version: int | None = None
+    risk_state_fingerprint: str | None = None
+    risk_limits_version: int | None = None
+    risk_limits_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         binding = (
@@ -69,7 +75,11 @@ class ExecutionIntentStore:
                 authorization_issued_at TEXT,
                 authorization_expires_at TEXT,
                 risk_decision TEXT,
-                risk_fingerprint TEXT
+                risk_fingerprint TEXT,
+                risk_state_version INTEGER,
+                risk_state_fingerprint TEXT,
+                risk_limits_version INTEGER,
+                risk_limits_fingerprint TEXT
             )
             """
         )
@@ -84,12 +94,26 @@ class ExecutionIntentStore:
             "authorization_expires_at",
             "risk_decision",
             "risk_fingerprint",
+            "risk_state_version",
+            "risk_state_fingerprint",
+            "risk_limits_version",
+            "risk_limits_fingerprint",
         ):
             if column not in columns:
                 connection.execute(
                     f"ALTER TABLE execution_intents ADD COLUMN {column} TEXT"
                 )
 
+        connection.execute("""CREATE TABLE IF NOT EXISTS live_risk_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1), symbol TEXT NOT NULL,
+                current_position_notional REAL NOT NULL, equity REAL NOT NULL,
+                session_start_equity REAL NOT NULL, high_water_mark REAL NOT NULL,
+                available_cash REAL NOT NULL, version INTEGER NOT NULL, fingerprint TEXT NOT NULL)""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS live_risk_limits (
+                id INTEGER PRIMARY KEY CHECK (id = 1), max_position_notional REAL NOT NULL,
+                max_order_notional REAL NOT NULL, max_daily_loss REAL NOT NULL,
+                max_drawdown REAL NOT NULL, max_leverage REAL NOT NULL,
+                version INTEGER NOT NULL, fingerprint TEXT NOT NULL)""")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS execution_halt (
@@ -148,6 +172,116 @@ class ExecutionIntentStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _has_active_live_authority_in_connection(connection: sqlite3.Connection) -> bool:
+        row=connection.execute("""SELECT 1 FROM execution_intents WHERE authorization_id IS NOT NULL AND status IN (?, ?, ?) LIMIT 1""",(BrokerOrderStatus.UNKNOWN.value,BrokerOrderStatus.ACCEPTED.value,BrokerOrderStatus.PARTIALLY_FILLED.value)).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _snapshot_from_row(row: tuple) -> RiskStateSnapshot:
+        return RiskStateSnapshot(symbol=row[0],current_position_notional=float(row[1]),equity=float(row[2]),session_start_equity=float(row[3]),high_water_mark=float(row[4]),available_cash=float(row[5]))
+
+    def initialize_live_risk_state(self,snapshot: RiskStateSnapshot)->int:
+        connection=self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM live_risk_state WHERE id=1").fetchone(): raise ValueError("LIVE_RISK_STATE_ALREADY_INITIALIZED")
+            connection.execute("""INSERT INTO live_risk_state(id,symbol,current_position_notional,equity,session_start_equity,high_water_mark,available_cash,version,fingerprint) VALUES (1,?,?,?,?,?,?,0,?)""",(snapshot.symbol,snapshot.current_position_notional,snapshot.equity,snapshot.session_start_equity,snapshot.high_water_mark,snapshot.available_cash,snapshot.fingerprint()))
+            connection.execute("COMMIT"); return 0
+        except Exception:
+            try: connection.execute("ROLLBACK")
+            except sqlite3.OperationalError: pass
+            raise
+        finally: connection.close()
+
+    def get_live_risk_state(self)->tuple[RiskStateSnapshot,int]:
+        connection=self._connect()
+        try:
+            row=connection.execute("""SELECT symbol,current_position_notional,equity,session_start_equity,high_water_mark,available_cash,version,fingerprint FROM live_risk_state WHERE id=1""").fetchone()
+            if row is None: raise RuntimeError("LIVE_RISK_STATE_NOT_INITIALIZED")
+            snapshot=self._snapshot_from_row(row)
+            if snapshot.fingerprint()!=row[7]: raise RuntimeError("LIVE_RISK_STATE_CORRUPT")
+            return snapshot,int(row[6])
+        finally: connection.close()
+
+    def mutate_live_risk_state(self,snapshot: RiskStateSnapshot,expected_version:int)->int:
+        connection=self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._has_active_live_authority_in_connection(connection): raise RuntimeError("LIVE_RISK_STATE_MUTATION_BLOCKED_BY_ACTIVE_AUTHORITY")
+            row=connection.execute("SELECT version FROM live_risk_state WHERE id=1").fetchone()
+            if row is None: raise RuntimeError("LIVE_RISK_STATE_NOT_INITIALIZED")
+            actual=int(row[0])
+            if actual!=expected_version: raise ValueError("RISK_STATE_VERSION_CONFLICT")
+            new_version=actual+1
+            connection.execute("""UPDATE live_risk_state SET symbol=?,current_position_notional=?,equity=?,session_start_equity=?,high_water_mark=?,available_cash=?,version=?,fingerprint=? WHERE id=1""",(snapshot.symbol,snapshot.current_position_notional,snapshot.equity,snapshot.session_start_equity,snapshot.high_water_mark,snapshot.available_cash,new_version,snapshot.fingerprint()))
+            connection.execute("COMMIT"); return new_version
+        except Exception:
+            try: connection.execute("ROLLBACK")
+            except sqlite3.OperationalError: pass
+            raise
+        finally: connection.close()
+
+    def initialize_live_risk_limits(self,limits: RiskLimits)->int:
+        connection=self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM live_risk_limits WHERE id=1").fetchone(): raise ValueError("LIVE_RISK_LIMITS_ALREADY_INITIALIZED")
+            connection.execute("""INSERT INTO live_risk_limits(id,max_position_notional,max_order_notional,max_daily_loss,max_drawdown,max_leverage,version,fingerprint) VALUES (1,?,?,?,?,?,?,?)""",(limits.max_position_notional,limits.max_order_notional,limits.max_daily_loss,limits.max_drawdown,limits.max_leverage,0,limits.fingerprint()))
+            connection.execute("COMMIT"); return 0
+        except Exception:
+            try: connection.execute("ROLLBACK")
+            except sqlite3.OperationalError: pass
+            raise
+        finally: connection.close()
+
+    def get_live_risk_limits(self)->tuple[RiskLimits,int]:
+        connection=self._connect()
+        try:
+            row=connection.execute("""SELECT max_position_notional,max_order_notional,max_daily_loss,max_drawdown,max_leverage,version,fingerprint FROM live_risk_limits WHERE id=1""").fetchone()
+            if row is None: raise RuntimeError("LIVE_RISK_LIMITS_NOT_INITIALIZED")
+            limits=RiskLimits(float(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]))
+            if limits.fingerprint()!=row[6]: raise RuntimeError("LIVE_RISK_LIMITS_CORRUPT")
+            return limits,int(row[5])
+        finally: connection.close()
+
+    def mutate_live_risk_limits(self,limits: RiskLimits,expected_version:int)->int:
+        connection=self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._has_active_live_authority_in_connection(connection): raise RuntimeError("LIVE_RISK_LIMITS_MUTATION_BLOCKED_BY_ACTIVE_AUTHORITY")
+            row=connection.execute("SELECT version FROM live_risk_limits WHERE id=1").fetchone()
+            if row is None: raise RuntimeError("LIVE_RISK_LIMITS_NOT_INITIALIZED")
+            actual=int(row[0])
+            if actual!=expected_version: raise ValueError("RISK_LIMITS_VERSION_CONFLICT")
+            new_version=actual+1
+            connection.execute("""UPDATE live_risk_limits SET max_position_notional=?,max_order_notional=?,max_daily_loss=?,max_drawdown=?,max_leverage=?,version=?,fingerprint=? WHERE id=1""",(limits.max_position_notional,limits.max_order_notional,limits.max_daily_loss,limits.max_drawdown,limits.max_leverage,new_version,limits.fingerprint()))
+            connection.execute("COMMIT"); return new_version
+        except Exception:
+            try: connection.execute("ROLLBACK")
+            except sqlite3.OperationalError: pass
+            raise
+        finally: connection.close()
+
+    def is_halted_in_connection(self,connection)->bool:
+        row=connection.execute("SELECT active FROM execution_halt WHERE id=1").fetchone()
+        return bool(row and row[0])
+
+    def _acquire_live_execution_authority_in_connection(self,connection,request,authorization_binding,risk_decision):
+        state_row=connection.execute("""SELECT symbol,current_position_notional,equity,session_start_equity,high_water_mark,available_cash,version,fingerprint FROM live_risk_state WHERE id=1""").fetchone()
+        if state_row is None: raise RuntimeError("LIVE_RISK_STATE_NOT_INITIALIZED")
+        state=self._snapshot_from_row(state_row)
+        if state.fingerprint()!=state_row[7]: raise RuntimeError("LIVE_RISK_STATE_CORRUPT")
+        limits_row=connection.execute("""SELECT max_position_notional,max_order_notional,max_daily_loss,max_drawdown,max_leverage,version,fingerprint FROM live_risk_limits WHERE id=1""").fetchone()
+        if limits_row is None: raise RuntimeError("LIVE_RISK_LIMITS_NOT_INITIALIZED")
+        limits=RiskLimits(float(limits_row[0]),float(limits_row[1]),float(limits_row[2]),float(limits_row[3]),float(limits_row[4]))
+        if limits.fingerprint()!=limits_row[6]: raise RuntimeError("LIVE_RISK_LIMITS_CORRUPT")
+        if risk_decision.risk_state_fingerprint!=state.fingerprint(): raise RuntimeError("RISK_STATE_CHANGED_AFTER_APPROVAL")
+        if risk_decision.risk_limits_fingerprint!=limits.fingerprint(): raise RuntimeError("RISK_LIMITS_FINGERPRINT_CONFLICT")
+        if risk_decision.decision_id!=request.decision_id: raise RuntimeError("RISK_DECISION_ID_CONFLICT")
+        if self.is_halted_in_connection(connection): raise RuntimeError("EXECUTION_HALTED")
+        return self._record_in_connection(connection,request,authorization_binding,risk_decision,int(state_row[6]),state.fingerprint(),int(limits_row[5]),limits.fingerprint())
+
     def authorization_is_active(self, authorization_id: str) -> bool:
         connection = self._connect()
         try:
@@ -168,9 +302,9 @@ class ExecutionIntentStore:
         ).fetchone()
         active = bool(row and row[0] == authorization_id)
         if active:
-            connection.execute(
-                "UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1"
-            )
+            if connection.execute("""SELECT 1 FROM execution_intents WHERE authorization_id = ? AND status IN (?, ?, ?) LIMIT 1""",(authorization_id,BrokerOrderStatus.UNKNOWN.value,BrokerOrderStatus.ACCEPTED.value,BrokerOrderStatus.PARTIALLY_FILLED.value)).fetchone():
+                raise RuntimeError("EXECUTION_AUTHORIZATION_REVOCATION_BLOCKED_BY_ACTIVE_AUTHORITY")
+            connection.execute("UPDATE execution_authorization_state SET active_authorization_id = NULL WHERE id = 1")
         return active
 
     def revoke_authorization(self, authorization_id: str) -> bool:
@@ -319,7 +453,8 @@ class ExecutionIntentStore:
             authorization_issued_at=row[6],
             authorization_expires_at=row[7],
             risk_decision=RiskDecision.model_validate(json.loads(row[8])) if row[8] else None,
-            risk_fingerprint=row[9],
+            risk_fingerprint=row[9], risk_state_version=row[10], risk_state_fingerprint=row[11],
+            risk_limits_version=row[12], risk_limits_fingerprint=row[13],
         )
 
     def _get_in_connection(
@@ -330,7 +465,8 @@ class ExecutionIntentStore:
         row = connection.execute(
             "SELECT idempotency_key, request, status, result, "
             "authorization_id, authorization_fingerprint, authorization_issued_at, "
-            "authorization_expires_at, risk_decision, risk_fingerprint "
+            "authorization_expires_at, risk_decision, risk_fingerprint, "
+            "risk_state_version, risk_state_fingerprint, risk_limits_version, risk_limits_fingerprint "
             "FROM execution_intents WHERE idempotency_key = ?",
             (idempotency_key,),
         ).fetchone()
@@ -342,6 +478,10 @@ class ExecutionIntentStore:
         request: BrokerOrderRequest,
         authorization_binding: tuple[str, str, str, str] | None = None,
         risk_decision: RiskDecision | None = None,
+        risk_state_version: int | None = None,
+        risk_state_fingerprint: str | None = None,
+        risk_limits_version: int | None = None,
+        risk_limits_fingerprint: str | None = None,
     ) -> tuple[ExecutionIntent, bool]:
         existing = self._get_in_connection(connection, request.idempotency_key)
         encoded_request = self._encode_request(request)
@@ -357,8 +497,8 @@ class ExecutionIntentStore:
             )
             if actual_binding != expected_binding:
                 raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
-            if existing.risk_fingerprint != (risk_decision.risk_fingerprint if risk_decision else None):
-                raise ValueError("EXECUTION_INTENT_RISK_CONFLICT")
+            if existing.risk_fingerprint != (risk_decision.risk_fingerprint if risk_decision else None): raise ValueError("EXECUTION_INTENT_RISK_CONFLICT")
+            if (existing.risk_state_version,existing.risk_state_fingerprint,existing.risk_limits_version,existing.risk_limits_fingerprint)!=(risk_state_version,risk_state_fingerprint,risk_limits_version,risk_limits_fingerprint): raise ValueError("EXECUTION_INTENT_RISK_AUTHORITY_CONFLICT")
             return existing, False
 
         connection.execute(
@@ -367,9 +507,10 @@ class ExecutionIntentStore:
                 idempotency_key, request, status, result,
                 authorization_id, authorization_fingerprint,
                 authorization_issued_at, authorization_expires_at,
-                risk_decision, risk_fingerprint
+                risk_decision, risk_fingerprint, risk_state_version, risk_state_fingerprint,
+                risk_limits_version, risk_limits_fingerprint
             )
-            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request.idempotency_key,
@@ -378,6 +519,7 @@ class ExecutionIntentStore:
                 *expected_binding,
                 risk_decision.model_dump_json() if risk_decision else None,
                 risk_decision.risk_fingerprint if risk_decision else None,
+                risk_state_version, risk_state_fingerprint, risk_limits_version, risk_limits_fingerprint,
             ),
         )
         created = self._get_in_connection(connection, request.idempotency_key)
