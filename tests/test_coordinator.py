@@ -367,16 +367,18 @@ def test_live_broker_rechecks_authorization_after_preparation(tmp_path):
 def test_live_broker_rejects_tampered_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker)
+    _, store, ledger = coordinator(tmp_path, broker)
     authorization = live_authorization()
-    coordinator_instance = ExecutionCoordinator(store, broker, ledger, authorization=type(authorization)(
-        authorization_id=authorization.authorization_id,
-        target=authorization.target,
-        evidence_fingerprint="tampered",
-    ))
-
+    # H9: a forged authorization is rejected at LIVE coordinator
+    # construction, before it can ever be held or activated.
     with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_INVALID"):
-        coordinator_instance.submit(req(), risk_for_live(req()))
+        ExecutionCoordinator(store, broker, ledger, authorization=type(authorization)(
+            authorization_id=authorization.authorization_id,
+            target=authorization.target,
+            evidence_fingerprint="tampered",
+        ))
+
+    assert broker.submissions == 0
 
     assert broker.submissions == 0
     assert store.get("intent-1") is None
@@ -1030,6 +1032,9 @@ def test_live_execution_intent_binds_exact_authorization(tmp_path):
     assert intent.authorization_fingerprint == PromotionGate.authorization_fingerprint(authorization)
     assert intent.authorization_issued_at == authorization.issued_at
     assert intent.authorization_expires_at == authorization.expires_at
+    # H2: the HMAC signature is part of the durable binding.
+    assert intent.authorization_signature == authorization.signature
+    assert intent.authorization_signature != ""
 
 
 def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tmp_path):
@@ -1066,8 +1071,16 @@ def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     finally:
         connection.close()
 
-    with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
+    # H3: a durable result-less intent refuses submission outright, before
+    # any binding comparison or broker contact.
+    with pytest.raises(RuntimeError, match="EXECUTION_UNKNOWN_RECONCILIATION_REQUIRED"):
         coordinator_instance.submit(req(), risk_for_live(req()))
+
+    assert broker.submissions == 0
+
+    # The tampered binding is still detected on the re-prepare path.
+    with pytest.raises(ValueError, match="EXECUTION_INTENT_AUTHORIZATION_CONFLICT"):
+        coordinator_instance.prepare(req(), risk_for_live(req()))
 
     assert broker.submissions == 0
 
@@ -1084,6 +1097,7 @@ def test_paper_execution_intent_has_no_live_authorization_binding(tmp_path):
     assert intent.authorization_fingerprint is None
     assert intent.authorization_issued_at is None
     assert intent.authorization_expires_at is None
+    assert intent.authorization_signature is None
 
 
 def test_live_execution_requires_explicit_authorization_activation(tmp_path):
@@ -1148,3 +1162,40 @@ def test_coordinator_authorization_cannot_be_replaced_after_construction(tmp_pat
         coordinator_instance.authorization = replacement
 
     assert coordinator_instance.authorization == authorization
+
+
+def test_resultless_intent_refuses_resubmission_after_restart(tmp_path):
+    # H3: crash-window simulation. A durable intent with no result (the broker
+    # may have been contacted in a previous process lifetime that died before
+    # committing the result) must refuse submission after restart instead of
+    # resubmitting. Zero broker contact, recovery via reconciliation only.
+    broker = AcceptedBroker()
+    broker.mode = BrokerMode.LIVE
+    coordinator_instance, store, _ledger = coordinator(
+        tmp_path, broker, authorization=live_authorization()
+    )
+    coordinator_instance.activate_execution_authorization("operator-crash-window")
+    coordinator_instance.prepare(req(), risk_for_live(req()))
+    assert store.get("intent-1") is not None
+    assert store.get("intent-1").result is None
+
+    # Simulate process restart: a fresh coordinator over the same durable store.
+    restarted_broker = AcceptedBroker()
+    restarted_broker.mode = BrokerMode.LIVE
+    restarted = ExecutionCoordinator(
+        ExecutionIntentStore(tmp_path / "execution.sqlite3"),
+        restarted_broker,
+        ImmutableLedger(tmp_path / "execution.sqlite3"),
+        authorization=live_authorization(),
+        risk_state_provider=lambda request: risk_state(),
+    )
+    restarted.activate_execution_authorization("operator-restart")
+
+    with pytest.raises(
+        RuntimeError, match="EXECUTION_UNKNOWN_RECONCILIATION_REQUIRED"
+    ):
+        restarted.submit(req(), risk_for_live(req()))
+
+    assert broker.submissions == 0
+    assert restarted_broker.submissions == 0
+    assert store.get("intent-1").result is None

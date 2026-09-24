@@ -23,6 +23,7 @@ class ExecutionIntent:
     authorization_fingerprint: str | None = None
     authorization_issued_at: str | None = None
     authorization_expires_at: str | None = None
+    authorization_signature: str | None = None
     risk_decision: RiskDecision | None = None
     risk_fingerprint: str | None = None
     risk_state_version: int | None = None
@@ -36,6 +37,7 @@ class ExecutionIntent:
             self.authorization_fingerprint,
             self.authorization_issued_at,
             self.authorization_expires_at,
+            self.authorization_signature,
         )
         if any(value is not None for value in binding) and not all(
             value is not None for value in binding
@@ -74,6 +76,7 @@ class ExecutionIntentStore:
                 authorization_fingerprint TEXT,
                 authorization_issued_at TEXT,
                 authorization_expires_at TEXT,
+                authorization_signature TEXT,
                 risk_decision TEXT,
                 risk_fingerprint TEXT,
                 risk_state_version INTEGER,
@@ -92,6 +95,7 @@ class ExecutionIntentStore:
             "authorization_fingerprint",
             "authorization_issued_at",
             "authorization_expires_at",
+            "authorization_signature",
             "risk_decision",
             "risk_fingerprint",
             "risk_state_version",
@@ -284,7 +288,7 @@ class ExecutionIntentStore:
         # surfaces as an authorization conflict rather than an activation
         # error. _record_in_connection re-verifies the full binding below.
         existing = self._get_in_connection(connection, request.idempotency_key)
-        if existing is not None and (existing.authorization_id, existing.authorization_fingerprint, existing.authorization_issued_at, existing.authorization_expires_at) != authorization_binding:
+        if existing is not None and (existing.authorization_id, existing.authorization_fingerprint, existing.authorization_issued_at, existing.authorization_expires_at, existing.authorization_signature) != authorization_binding:
             raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
         auth_row=connection.execute("SELECT active_authorization_id FROM execution_authorization_state WHERE id=1").fetchone()
         if not auth_row or auth_row[0] != authorization_binding[0]: raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
@@ -465,6 +469,7 @@ class ExecutionIntentStore:
             authorization_fingerprint=row[5],
             authorization_issued_at=row[6],
             authorization_expires_at=row[7],
+            authorization_signature=row[14],
             risk_decision=RiskDecision.model_validate(json.loads(row[8])) if row[8] else None,
             risk_fingerprint=row[9], risk_state_version=row[10], risk_state_fingerprint=row[11],
             risk_limits_version=row[12], risk_limits_fingerprint=row[13],
@@ -479,7 +484,8 @@ class ExecutionIntentStore:
             "SELECT idempotency_key, request, status, result, "
             "authorization_id, authorization_fingerprint, authorization_issued_at, "
             "authorization_expires_at, risk_decision, risk_fingerprint, "
-            "risk_state_version, risk_state_fingerprint, risk_limits_version, risk_limits_fingerprint "
+            "risk_state_version, risk_state_fingerprint, risk_limits_version, risk_limits_fingerprint, "
+            "authorization_signature "
             "FROM execution_intents WHERE idempotency_key = ?",
             (idempotency_key,),
         ).fetchone()
@@ -489,7 +495,7 @@ class ExecutionIntentStore:
         self,
         connection: sqlite3.Connection,
         request: BrokerOrderRequest,
-        authorization_binding: tuple[str, str, str, str] | None = None,
+        authorization_binding: tuple[str, str, str, str, str] | None = None,
         risk_decision: RiskDecision | None = None,
         risk_state_version: int | None = None,
         risk_state_fingerprint: str | None = None,
@@ -498,7 +504,7 @@ class ExecutionIntentStore:
     ) -> tuple[ExecutionIntent, bool]:
         existing = self._get_in_connection(connection, request.idempotency_key)
         encoded_request = self._encode_request(request)
-        expected_binding = authorization_binding or (None, None, None, None)
+        expected_binding = authorization_binding or (None, None, None, None, None)
         if existing is not None:
             if existing.request != request:
                 raise ValueError("EXECUTION_INTENT_CONFLICT")
@@ -507,6 +513,7 @@ class ExecutionIntentStore:
                 existing.authorization_fingerprint,
                 existing.authorization_issued_at,
                 existing.authorization_expires_at,
+                existing.authorization_signature,
             )
             if actual_binding != expected_binding:
                 raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
@@ -520,10 +527,11 @@ class ExecutionIntentStore:
                 idempotency_key, request, status, result,
                 authorization_id, authorization_fingerprint,
                 authorization_issued_at, authorization_expires_at,
+                authorization_signature,
                 risk_decision, risk_fingerprint, risk_state_version, risk_state_fingerprint,
                 risk_limits_version, risk_limits_fingerprint
             )
-            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request.idempotency_key,
@@ -668,6 +676,82 @@ class ExecutionIntentStore:
             raise
         finally:
             connection.close()
+
+    def _apply_live_fill_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        intent_before: ExecutionIntent | None,
+        result: BrokerOrderResult,
+    ) -> None:
+        """Apply a fill delta to the aggregate LIVE risk state, atomically.
+
+        Must be called in the same transaction that commits the fill result,
+        so risk state and execution state cannot desynchronize (H4). Only
+        LIVE (authorization-bound) intents update the aggregate state; other
+        modes and non-fill results are no-ops. ``filled_quantity`` is
+        cumulative, so only the delta since the previously committed result
+        is applied.
+        """
+        if intent_before is None or intent_before.authorization_id is None:
+            return
+        if result.filled_quantity is None:
+            return
+        previous_filled = (
+            intent_before.result.filled_quantity
+            if intent_before.result is not None
+            and intent_before.result.filled_quantity is not None
+            else 0.0
+        )
+        delta_quantity = result.filled_quantity - previous_filled
+        if delta_quantity <= 0:
+            return
+        request = intent_before.request
+        effective_price = (
+            request.price if request.price is not None else request.reference_price
+        )
+        if effective_price is None or effective_price <= 0:
+            raise RuntimeError("LIVE_FILL_PRICE_UNAVAILABLE")
+        delta_notional = delta_quantity * effective_price
+        row = connection.execute(
+            "SELECT symbol,current_position_notional,equity,session_start_equity,"
+            "high_water_mark,available_cash,version,fingerprint "
+            "FROM live_risk_state WHERE id=1"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("LIVE_RISK_STATE_NOT_INITIALIZED")
+        state = self._snapshot_from_row(row)
+        if state.fingerprint() != row[7]:
+            raise RuntimeError("LIVE_RISK_STATE_CORRUPT")
+        if request.side is Side.BUY:
+            new_position_notional = state.current_position_notional + delta_notional
+            new_cash = state.available_cash - delta_notional
+        else:
+            new_position_notional = state.current_position_notional - delta_notional
+            new_cash = state.available_cash + delta_notional
+        new_state = RiskStateSnapshot(
+            symbol=state.symbol,
+            current_position_notional=new_position_notional,
+            equity=state.equity,
+            session_start_equity=state.session_start_equity,
+            high_water_mark=max(state.high_water_mark, state.equity),
+            available_cash=new_cash,
+        )
+        new_version = int(row[6]) + 1
+        connection.execute(
+            "UPDATE live_risk_state SET symbol=?,current_position_notional=?,"
+            "equity=?,session_start_equity=?,high_water_mark=?,available_cash=?,"
+            "version=?,fingerprint=? WHERE id=1",
+            (
+                new_state.symbol,
+                new_state.current_position_notional,
+                new_state.equity,
+                new_state.session_start_equity,
+                new_state.high_water_mark,
+                new_state.available_cash,
+                new_version,
+                new_state.fingerprint(),
+            ),
+        )
 
     def update_result(
         self,

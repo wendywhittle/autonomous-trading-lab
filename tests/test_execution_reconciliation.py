@@ -137,10 +137,9 @@ def test_execution_consistency_detects_audit_state_conflict(tmp_path):
     result = inspect_execution_consistency(store, ledger)
 
     assert not result.healthy
-    assert any(
-        error.startswith("EXECUTION_AUDIT_STATE_MISMATCH:consistency-1:")
-        for error in result.errors
-    )
+    # H5: payload tampering is caught by the hash chain before any
+    # audit-content comparison runs. The conflict is reported, never repaired.
+    assert result.errors == ("LEDGER_CHAIN_TAMPERED",)
 
 
 def test_execution_consistency_detects_missing_created_audit(tmp_path):
@@ -157,7 +156,10 @@ def test_execution_consistency_detects_missing_created_audit(tmp_path):
     result = inspect_execution_consistency(store, ledger)
 
     assert not result.healthy
-    assert "EXECUTION_INTENT_AUDIT_COUNT_MISMATCH:consistency-1:CREATED=0" in result.errors
+    # H5: deleting the trailing audit row is a suffix truncation: the tip
+    # anchor disagrees with the table, so the chain reports tampering before
+    # any audit-content comparison runs.
+    assert result.errors == ("LEDGER_CHAIN_TAMPERED",)
 
 
 def test_execution_consistency_detects_orphan_audit(tmp_path):
@@ -504,18 +506,19 @@ def test_filled_result_must_account_for_entire_requested_quantity(tmp_path):
     coordinator, store, _ledger = setup(tmp_path)
     coordinator.prepare(request())
 
-    with pytest.raises(ValueError, match="INVALID_FILLED_QUANTITY"):
-        store.update_result(
-            "consistency-1",
-            BrokerOrderResult(
-                accepted=True,
-                broker_order_id="broker-1",
-                status=BrokerOrderStatus.FILLED,
-                message="BAD_FILL",
-                filled_quantity=0.80,
-                remaining_quantity=0.20,
-            ),
-        )
+    # H11: filled=0.5/remaining=0 passes BrokerOrderResult.__post_init__
+    # (a well-formed FILLED payload) but must fail store validation because
+    # the fill accounts for only half of the requested quantity of 1.
+    result = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.FILLED,
+        message="SHORT_FILL",
+        filled_quantity=0.5,
+        remaining_quantity=0,
+    )
+    with pytest.raises(ValueError, match="EXECUTION_FILL_QUANTITY_TOTAL_MISMATCH"):
+        store.update_result("consistency-1", result)
 
 
 def test_partial_fill_requires_exact_quantity_total(tmp_path):
@@ -585,4 +588,66 @@ def test_fill_audit_quantity_corruption_forces_unhealthy_reconciliation(tmp_path
 
     result = inspect_execution_consistency(store, ledger)
     assert not result.healthy
-    assert "EXECUTION_AUDIT_STATE_MISMATCH:consistency-1:filled_quantity" in result.errors
+    # H5: the quantity edit breaks the entry hash, so the chain reports the
+    # tampering before any fill-quantity comparison runs.
+    assert result.errors == ("LEDGER_CHAIN_TAMPERED",)
+
+
+# --- H5: hash-chain verification on read (beyond the reconciliation layer). ---
+
+def test_ledger_read_detects_full_wipe(tmp_path):
+    _coordinator, _store, ledger = setup(tmp_path)
+    ledger.append("TEST_EVENT", "test-1", {"a": 1})
+    assert len(ledger.read()) == 1
+
+    # Wipe every event row: the ledger_meta tip anchor disagrees with the
+    # table, so the chain is reported broken on read.
+    connection = sqlite3.connect(ledger.path)
+    connection.execute("DELETE FROM events")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="LEDGER_CHAIN_BROKEN"):
+        ledger.read()
+
+
+def test_ledger_read_detects_entry_hash_corruption(tmp_path):
+    _coordinator, _store, ledger = setup(tmp_path)
+    ledger.append("TEST_EVENT", "test-1", {"a": 1})
+    ledger.append("TEST_EVENT", "test-2", {"a": 2})
+
+    # Corrupt a stored entry hash: the recomputed link no longer matches.
+    connection = sqlite3.connect(ledger.path)
+    connection.execute(
+        "UPDATE events SET entry_hash = ? WHERE event_id = ?",
+        ("0" * 64, "test-1"),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="LEDGER_CHAIN_TAMPERED"):
+        ledger.read()
+
+
+def test_ledger_read_detects_sequence_gap(tmp_path):
+    _coordinator, _store, ledger = setup(tmp_path)
+    ledger.append("TEST_EVENT", "test-1", {"a": 1})
+    ledger.append("TEST_EVENT", "test-2", {"a": 2})
+    ledger.append("TEST_EVENT", "test-3", {"a": 3})
+
+    # Delete the middle row and repair the tip anchor so only the gap
+    # remains: the sequence check must still catch it.
+    connection = sqlite3.connect(ledger.path)
+    tip_hash = connection.execute(
+        "SELECT entry_hash FROM events WHERE event_id = 'test-3'"
+    ).fetchone()[0]
+    connection.execute("DELETE FROM events WHERE event_id = 'test-2'")
+    connection.execute(
+        "UPDATE ledger_meta SET tip_sequence = 3, tip_hash = ? WHERE id = 1",
+        (tip_hash,),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="LEDGER_CHAIN_BROKEN"):
+        ledger.read()

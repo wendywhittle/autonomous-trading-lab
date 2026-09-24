@@ -66,6 +66,15 @@ class ExecutionCoordinator:
         )
         self._risk = risk or DeterministicRiskEngine()
         self._risk_state_provider = risk_state_provider
+        # H9: a LIVE coordinator never holds a forged, expired, or unsigned
+        # authorization, even before activation. Fail fast at construction;
+        # activation and every execution entry point re-validate.
+        if (
+            getattr(broker, "mode", None) is BrokerMode.LIVE
+            and authorization is not None
+            and not PromotionGate.validate_authorization(authorization)
+        ):
+            raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
 
     @property
     def broker(self) -> BrokerAdapter:
@@ -312,6 +321,7 @@ class ExecutionCoordinator:
                         PromotionGate.authorization_fingerprint(authorization),
                         authorization.issued_at,
                         authorization.expires_at,
+                        authorization.signature,
                     )
                 if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
                     _, created = self.store._acquire_live_execution_authority_in_connection(connection, request, authorization_binding, risk_decision)
@@ -347,6 +357,11 @@ class ExecutionCoordinator:
                             ),
                             "authorization_expires_at": (
                                 authorization.expires_at
+                                if authorization is not None
+                                else None
+                            ),
+                            "authorization_signature": (
+                                authorization.signature
                                 if authorization is not None
                                 else None
                             ),
@@ -388,7 +403,11 @@ class ExecutionCoordinator:
     ) -> None:
         connection = self._transaction()
         try:
+            intent_before = self.store._get_in_connection(connection, idempotency_key)
             self.store._update_result_in_connection(connection, idempotency_key, result)
+            # H4: the aggregate LIVE risk state moves in the same transaction
+            # as the fill result, so the two can never desynchronize.
+            self.store._apply_live_fill_in_connection(connection, intent_before, result)
             self.ledger._append_in_connection(
                 connection,
                 event_type,
@@ -600,11 +619,14 @@ class ExecutionCoordinator:
                 existing.status,
                 existing.result,
             )
-        # An intent with no result means the broker was never contacted for
-        # this key: preparation is idempotent, so fall through and continue
-        # the normal flow (re-validation happens before any broker contact).
-        # The idempotency-key contract and recover_unknown() remain the
-        # dedup/recovery mechanisms for genuinely unknown provider state.
+        # H3: a durable result-less intent must NOT be treated as proof the
+        # broker was never contacted. A crash between broker contact and
+        # result commit leaves exactly this state, and the same idempotency
+        # key may already have a live order at the provider. Fail closed:
+        # recovery must go through provider reconciliation
+        # (recover_unknown()/provider discovery), never silent resubmission.
+        if existing is not None and existing.result is None:
+            raise RuntimeError("EXECUTION_UNKNOWN_RECONCILIATION_REQUIRED")
 
         self.prepare(request, risk_decision)
         existing = self.store.get(request.idempotency_key)
@@ -618,7 +640,7 @@ class ExecutionCoordinator:
             try:
                 current, _ = self.store._acquire_live_execution_authority_in_connection(
                     connection, request,
-                    (authorization.authorization_id, PromotionGate.authorization_fingerprint(authorization), authorization.issued_at, authorization.expires_at),
+                    (authorization.authorization_id, PromotionGate.authorization_fingerprint(authorization), authorization.issued_at, authorization.expires_at, authorization.signature),
                     risk_decision,
                 )
                 if current.idempotency_key != existing.idempotency_key: raise RuntimeError("EXECUTION_AUTHORITY_CONFLICT")

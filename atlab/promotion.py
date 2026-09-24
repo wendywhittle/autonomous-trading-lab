@@ -1,5 +1,7 @@
 import hashlib
+import hmac
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -9,6 +11,13 @@ class PromotionMode(str, Enum):
     RESEARCH = "RESEARCH"
     PAPER = "PAPER"
     LIVE = "LIVE"
+
+
+#: Environment variable holding the HMAC key that signs LIVE execution
+#: authorizations. LIVE authorization paths fail closed when it is absent:
+#: issuance is refused and validation returns False. The key is never logged
+#: or committed; it only ever travels from the environment into HMAC.
+AUTH_SIGNING_KEY_ENV = "ATLAB_AUTH_SIGNING_KEY"
 
 
 @dataclass(frozen=True)
@@ -34,13 +43,19 @@ class PromotionResult:
 
 @dataclass(frozen=True)
 class ExecutionAuthorization:
-    """Immutable authorization artifact required before LIVE broker submission."""
+    """Immutable authorization artifact required before LIVE broker submission.
+
+    ``signature`` is HMAC-SHA256 over ``authorization_id`` keyed by
+    ``ATLAB_AUTH_SIGNING_KEY``. An empty signature means unsigned and never
+    validates for LIVE use.
+    """
 
     authorization_id: str
     target: PromotionMode
     evidence_fingerprint: str
     issued_at: str | None = None
     expires_at: str | None = None
+    signature: str = ""
 
 
 class PromotionGate:
@@ -130,7 +145,34 @@ class PromotionGate:
         except ValueError:
             return False
         expected = PromotionGate.authorization_fingerprint(authorization)
-        return authorization.authorization_id == expected
+        if authorization.authorization_id != expected:
+            return False
+        # H2: the authorization must carry a valid HMAC signature. Without a
+        # configured signing key, or with a missing/forged signature,
+        # validation fails closed.
+        if not authorization.signature:
+            return False
+        key = PromotionGate.signing_key()
+        if key is None:
+            return False
+        expected_signature = PromotionGate.sign_authorization_id(
+            authorization.authorization_id, key
+        )
+        return hmac.compare_digest(expected_signature, authorization.signature)
+
+    @staticmethod
+    def signing_key() -> bytes | None:
+        """Return the HMAC signing key from the environment, if configured."""
+        key = os.environ.get(AUTH_SIGNING_KEY_ENV)
+        if not key:
+            return None
+        return key.encode("utf-8")
+
+    @staticmethod
+    def sign_authorization_id(authorization_id: str, key: bytes) -> str:
+        return hmac.new(
+            key, authorization_id.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
     def authorize(
         self,
@@ -157,10 +199,17 @@ class PromotionGate:
         authorization_id = hashlib.sha256(
             f"{target.value}:{fingerprint}:{issued_at}:{expires_at}".encode()
         ).hexdigest()
+        # H2: LIVE authorizations are HMAC-signed. Without a configured
+        # signing key, issuance fails closed.
+        key = self.signing_key()
+        if key is None:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_SIGNING_KEY_MISSING")
+        signature = self.sign_authorization_id(authorization_id, key)
         return ExecutionAuthorization(
             authorization_id=authorization_id,
             target=target,
             evidence_fingerprint=fingerprint,
             issued_at=issued_at,
             expires_at=expires_at,
+            signature=signature,
         )

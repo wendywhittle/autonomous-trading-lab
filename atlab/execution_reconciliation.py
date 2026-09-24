@@ -31,7 +31,13 @@ def inspect_execution_consistency(
     reconciliation decision.
     """
     errors: list[str] = []
-    events = ledger.read()
+    try:
+        events = ledger.read()
+    except ValueError as exc:
+        # H5: the hash chain fails closed. A tampered ledger cannot be
+        # inspected; report the chain failure as the finding instead of
+        # crashing or, worse, reasoning over forged audit events.
+        return ExecutionConsistency(healthy=False, errors=(str(exc),))
 
     audit_by_key: dict[str, list] = {}
     for event in events:

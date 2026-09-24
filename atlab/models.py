@@ -107,3 +107,8 @@ class LedgerEvent(BaseModel):
     event_id: str
     timestamp: datetime
     payload: dict[str, Any]
+    # Hash-chain fields (H5 audit fix): prev_hash links to the previous
+    # entry's entry_hash ("GENESIS" for the first entry); entry_hash is
+    # SHA-256 over the canonical entry fields plus prev_hash.
+    prev_hash: str = ""
+    entry_hash: str = ""

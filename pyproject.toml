@@ -21,6 +21,9 @@ include = ["atlab*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "promote_cli: tests invoking the atlab promote evidence collector (deselected inside its own pytest subprocess to avoid recursion)",
+]
 
 [tool.ruff]
 line-length = 100

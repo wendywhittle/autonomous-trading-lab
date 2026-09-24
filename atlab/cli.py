@@ -10,14 +10,23 @@ performance metrics.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .adapters import CsvMarketData
 from .backtest import run_paper_backtest
+from .evidence import (
+    collect_evidence,
+    live_evidence_notes,
+    requirement_rows,
+    risk_limits_notes,
+)
 from .ledger import ImmutableLedger
 from .models import StrategyVersion
 from .portfolio import PaperPortfolio
+from .promotion import PromotionGate, PromotionMode
 from .risk import DeterministicRiskEngine
 from .runtime import PaperTradingEngine, TradingMode
 
@@ -80,6 +89,24 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
     print(f"final equity={cycles[-1].equity:.2f}" if cycles else "no cycles")
     print(f"state persisted under {workdir}")
+    # H9: completion record consumed as promotion evidence by `atlab promote`.
+    (workdir / "paper_run.json").write_text(
+        json.dumps(
+            {
+                "completed": True,
+                "symbol": symbol,
+                "strategy_id": args.strategy_id,
+                "strategy_version": args.strategy_version,
+                "cycles": len(cycles),
+                "trades": trades,
+                "final_equity": cycles[-1].equity if cycles else None,
+                "finished_at": datetime.now(UTC).isoformat(),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     return 0
 
 
@@ -111,6 +138,87 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Evaluate promotion evidence through the PromotionGate (H9).
+
+    The gate is no longer advisory: this command constructs it, collects
+    evidence that is actually verified locally (never assumed), keeps
+    attested-but-unverified evidence explicit, and records the decision.
+    A LIVE authorization is minted only if the evidence is fully eligible;
+    with no live broker adapter in this repo, LIVE is unreachable and the
+    command reports exactly which requirements fail.
+    """
+    target = PromotionMode(args.target.upper())
+    workdir = Path(args.workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    strategy = _strategy(args)
+
+    print(f"collecting {target.value} promotion evidence (local verification)...")
+    evidence, provenance = collect_evidence(
+        workdir=workdir,
+        csv_path=args.csv,
+        symbol=args.symbol,
+        strategy=strategy,
+        quantity=args.quantity,
+        human_approval_attestation=args.attest_human_approval,
+    )
+
+    gate = PromotionGate()
+    result = gate.evaluate(evidence, target)
+
+    notes = live_evidence_notes()
+    print(f"target={target.value} eligible={result.eligible}")
+    print("evidence:")
+    for field, reason in requirement_rows(target):
+        value = getattr(evidence, field)
+        status = "pass" if value else "FAIL"
+        line = f"  [{status}] {field}={value} ({provenance[field]})"
+        if field in notes:
+            line += f" -- {notes[field]}"
+        if field == "risk_limits_active" and value:
+            line += f" -- {risk_limits_notes()}"
+        print(line)
+    if not result.eligible:
+        print("failed_requirements=" + "|".join(result.failed_requirements))
+
+    record = {
+        "target": target.value,
+        "eligible": result.eligible,
+        "failed_requirements": list(result.failed_requirements),
+        "evidence": {
+            field: {"value": getattr(evidence, field), "provenance": provenance[field]}
+            for field, _reason in requirement_rows(target)
+        },
+        "human_approval_attestation": args.attest_human_approval,
+        "workdir": str(workdir),
+        "evaluated_at": datetime.now(UTC).isoformat(),
+    }
+    record_path = workdir / "promotion_record.json"
+    record_path.write_text(
+        json.dumps(record, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    print(f"promotion record written to {record_path}")
+
+    if not result.eligible:
+        return 1
+    if target is PromotionMode.LIVE:
+        # Reachable only with fully eligible LIVE evidence. Minting requires
+        # the HMAC signing key (H2); without it this fails closed.
+        authorization = gate.authorize(evidence, target)
+        print("LIVE execution authorization minted:")
+        print(f"  authorization_id={authorization.authorization_id}")
+        print(f"  issued_at={authorization.issued_at}")
+        print(f"  expires_at={authorization.expires_at}")
+        print(
+            "  signature_present="
+            f"{bool(authorization.signature)} (HMAC-SHA256, key from "
+            "ATLAB_AUTH_SIGNING_KEY; the key is never printed)"
+        )
+    else:
+        print("PROMOTION_ELIGIBLE:paper")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="atlab", description="Autonomous Trading Lab (paper/research only).")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -122,6 +230,27 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser = subparsers.add_parser("backtest", help="Backtest a strategy on CSV data and print metrics.")
     _add_common(backtest_parser)
     backtest_parser.set_defaults(func=cmd_backtest)
+
+    promote_parser = subparsers.add_parser(
+        "promote",
+        help="Evaluate promotion evidence through the PromotionGate.",
+    )
+    _add_common(promote_parser)
+    promote_parser.add_argument(
+        "--target",
+        required=True,
+        choices=["paper", "live"],
+        help="Promotion target mode.",
+    )
+    promote_parser.add_argument(
+        "--attest-human-approval",
+        default=None,
+        help=(
+            "Explicit human approval attestation (e.g. 'Name <role>: reason'). "
+            "Recorded as attested, NOT independently verified."
+        ),
+    )
+    promote_parser.set_defaults(func=cmd_promote)
     return parser
 
 
