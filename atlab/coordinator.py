@@ -509,6 +509,7 @@ class ExecutionCoordinator:
             )
 
     def submit(self, request: BrokerOrderRequest, risk_decision: RiskDecision | None = None) -> ExecutionAttempt:
+        """Submit only after durable LIVE execution authority is established."""
         self._require_execution_authorization()
         self.enforce_reconciliation_safety()
         if self.store.is_halted():
