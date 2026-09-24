@@ -38,7 +38,7 @@ def test_concurrent_state_mutations_have_one_winner(tmp_path):
     def mutate(value):
         try:
             return store.mutate_live_risk_state(snapshot(value),0)
-        except Exception as exc:
+        except ValueError as exc:
             return str(exc)
     with ThreadPoolExecutor(max_workers=8) as pool:
         results=list(pool.map(mutate,[900+i for i in range(8)]))

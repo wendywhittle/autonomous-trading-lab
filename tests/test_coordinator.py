@@ -1,4 +1,5 @@
 import concurrent.futures
+from datetime import UTC, datetime
 
 import pytest
 
@@ -10,16 +11,14 @@ from atlab.broker import (
     BrokerRecoveryResult,
     DisabledBroker,
 )
-from atlab.coordinator import ExecutionCoordinator, IntentStatus
 from atlab.compliance import ComplianceEngine, CompliancePolicy
+from atlab.coordinator import ExecutionCoordinator, IntentStatus
 from atlab.execution import ExecutionIntentStore
 from atlab.ledger import ImmutableLedger
-from datetime import UTC, datetime
-
 from atlab.models import DecisionAction, JEVDecision, Side
+from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 from atlab.risk import DeterministicRiskEngine
 from atlab.risk_state import RiskStateSnapshot
-from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 
 
 class FailingBroker:
@@ -486,7 +485,6 @@ def test_coordinator_reconciliation_closes_unknown_or_open_state(tmp_path):
     assert intent.result.status is BrokerOrderStatus.FILLED
     assert [event.event_type for event in ledger.read()] == [
         "COMPLIANCE_DECISION",
-        "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_RESULT",
         "EXECUTION_RECONCILED",
@@ -694,7 +692,6 @@ def test_provider_accepted_order_is_recovered_by_idempotency_key_after_unknown(t
     assert store.get("intent-1").result.broker_order_id == "broker-crash-1"
     assert [event.event_type for event in ledger.read()] == [
         "COMPLIANCE_DECISION",
-        "COMPLIANCE_DECISION",
         "EXECUTION_INTENT_CREATED",
         "EXECUTION_UNKNOWN",
         "EXECUTION_RECOVERED",
@@ -872,7 +869,7 @@ def test_live_broker_rejects_revoked_authorization(tmp_path):
 def test_new_live_authorization_replaces_previous_active_session(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    first, store, _ = coordinator(tmp_path, broker, authorization=live_authorization())
     first.activate_execution_authorization("operator-first")
     first.submit(req(), risk_for_live(req()))
     first_id = first.authorization.authorization_id
@@ -890,7 +887,7 @@ def test_new_live_authorization_replaces_previous_active_session(tmp_path):
 def test_revoked_live_authorization_cannot_be_reactivated_by_new_coordinator(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    first, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    first, store, _ = coordinator(tmp_path, broker, authorization=live_authorization())
     first.activate_execution_authorization("operator-first")
     first.submit(req(), risk_for_live(req()))
     first.revoke_execution_authorization("operator-revoke")
@@ -1022,7 +1019,7 @@ def test_compliance_blocks_order_notional_limit(tmp_path):
 def test_live_execution_intent_binds_exact_authorization(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    coordinator_instance, store, _ = coordinator(tmp_path, broker, authorization=live_authorization())
     authorization = coordinator_instance.authorization
     coordinator_instance.activate_execution_authorization("operator-bind")
 
@@ -1054,7 +1051,7 @@ def test_live_intent_rejects_different_authorization_for_same_idempotency_key(tm
 def test_tampered_live_intent_authorization_binding_blocks_submission(tmp_path):
     broker = AcceptedBroker()
     broker.mode = BrokerMode.LIVE
-    coordinator_instance, store, ledger = coordinator(tmp_path, broker, authorization=live_authorization())
+    coordinator_instance, store, _ = coordinator(tmp_path, broker, authorization=live_authorization())
     coordinator_instance.activate_execution_authorization("operator-tamper")
     coordinator_instance.prepare(req(), risk_for_live(req()))
 

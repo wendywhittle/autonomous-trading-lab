@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from atlab.models import DecisionAction, JEVDecision, Side
 from atlab.risk import DeterministicRiskEngine, RiskLimits
@@ -69,7 +70,7 @@ def test_risk_evidence_engine_version_is_immutable_and_tampering_is_rejected():
         DeterministicRiskEngine.validate_evidence(
             result.model_copy(update={"engine_version": "tampered"})
         )
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         result.engine_version = "tampered"
 
 

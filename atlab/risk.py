@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from .models import DecisionAction, JEVDecision, RiskDecision, Side
+from .models import DecisionAction, RiskDecision, Side
 from .risk_state import RiskStateSnapshot
 
 
@@ -15,6 +15,19 @@ class RiskLimits:
     max_daily_loss: float = 500
     max_drawdown: float = 1_000
     max_leverage: float = 1.0
+
+    def __post_init__(self) -> None:
+        # Canonicalize numerics to float so fingerprints are stable across
+        # SQLite round-trips (which return floats for stored integers),
+        # mirroring RiskStateSnapshot.
+        for field in (
+            "max_position_notional",
+            "max_order_notional",
+            "max_daily_loss",
+            "max_drawdown",
+            "max_leverage",
+        ):
+            object.__setattr__(self, field, float(getattr(self, field)))
 
     def fingerprint(self) -> str:
         payload = {
@@ -102,16 +115,15 @@ class DeterministicRiskEngine:
     def evaluate(self, decision, price, quantity, current_position_notional=0, *,
                  equity=None, session_start_equity=None, high_water_mark=None,
                  available_cash=None, risk_state: RiskStateSnapshot | None = None):
-        if risk_state is not None:
-            if (
-                risk_state.symbol != decision.symbol
-                or risk_state.current_position_notional != current_position_notional
-                or risk_state.equity != equity
-                or risk_state.session_start_equity != session_start_equity
-                or risk_state.high_water_mark != high_water_mark
-                or risk_state.available_cash != available_cash
-            ):
-                raise ValueError("RISK_STATE_INPUT_MISMATCH")
+        if risk_state is not None and (
+            risk_state.symbol != decision.symbol
+            or risk_state.current_position_notional != current_position_notional
+            or risk_state.equity != equity
+            or risk_state.session_start_equity != session_start_equity
+            or risk_state.high_water_mark != high_water_mark
+            or risk_state.available_cash != available_cash
+        ):
+            raise ValueError("RISK_STATE_INPUT_MISMATCH")
         risk_state_fingerprint = risk_state.fingerprint() if risk_state else None
 
         def result(approved, reason, max_notional):

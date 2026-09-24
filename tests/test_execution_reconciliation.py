@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,8 +13,6 @@ from atlab.coordinator import ExecutionCoordinator
 from atlab.execution import ExecutionIntentStore
 from atlab.execution_reconciliation import assert_execution_halt, inspect_execution_consistency
 from atlab.ledger import ImmutableLedger
-from datetime import UTC, datetime
-
 from atlab.models import DecisionAction, JEVDecision, Side
 from atlab.promotion import PromotionEvidence, PromotionGate, PromotionMode
 from atlab.risk import DeterministicRiskEngine
