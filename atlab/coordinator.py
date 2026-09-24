@@ -514,17 +514,20 @@ class ExecutionCoordinator:
         if self.store.is_halted():
             reason = self.store.halt_reason() or "EXECUTION_HALTED"
             raise RuntimeError(f"EXECUTION_HALTED:{reason}")
-        self.prepare(request, risk_decision)
         existing = self.store.get(request.idempotency_key)
-        if existing is None:
-            raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
-
-        if existing.result is not None:
+        if existing is not None:
+            if existing.result is None:
+                raise RuntimeError("EXECUTION_UNKNOWN_RECONCILIATION_REQUIRED")
             return self._attempt_from_intent(
                 request.idempotency_key,
                 existing.status,
                 existing.result,
             )
+
+        self.prepare(request, risk_decision)
+        existing = self.store.get(request.idempotency_key)
+        if existing is None:
+            raise RuntimeError("EXECUTION_INTENT_NOT_PERSISTED")
 
         if getattr(self.broker, "mode", None) is BrokerMode.LIVE:
             authorization = self._require_execution_authorization()
