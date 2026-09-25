@@ -98,7 +98,7 @@ def test_risk_evidence_fields_are_immutable():
         ("side", Side.SELL),
         ("engine_version", "tampered"),
     ):
-        with __import__("pytest").raises(Exception):
+        with pytest.raises((ValidationError, TypeError)):
             result.__setattr__(field, value)
 
 

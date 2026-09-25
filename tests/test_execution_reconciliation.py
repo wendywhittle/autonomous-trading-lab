@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from atlab.broker import (
+    BrokerMode,
     BrokerOrderRequest,
     BrokerOrderResult,
     BrokerOrderStatus,
@@ -651,3 +652,123 @@ def test_ledger_read_detects_sequence_gap(tmp_path):
 
     with pytest.raises(ValueError, match="LEDGER_CHAIN_BROKEN"):
         ledger.read()
+
+
+# --- M23: reconciliation conflict-to-halt sibling branches. ---
+
+
+class VanishingReconcileBroker(DisabledBroker):
+    """Accepts the order, then reports it as vanished (UNKNOWN)."""
+
+    mode = BrokerMode.LIVE
+
+    def submit(self, request):
+        return BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.ACCEPTED,
+            message="ACCEPTED",
+        )
+
+    def reconcile(self, broker_order_ids):
+        return tuple(
+            BrokerOrderResult(
+                accepted=False,
+                broker_order_id=order_id,
+                status=BrokerOrderStatus.UNKNOWN,
+                message="VANISHED",
+            )
+            for order_id in broker_order_ids
+        )
+
+
+def live_coordinator(tmp_path, broker):
+    db = tmp_path / "execution.sqlite3"
+    store = ExecutionIntentStore(db)
+    ledger = ImmutableLedger(db)
+    coordinator = ExecutionCoordinator(
+        store,
+        broker,
+        ledger,
+        authorization=live_authorization(),
+        risk_state_provider=lambda request: RiskStateSnapshot(
+            symbol="TEST",
+            current_position_notional=0,
+            equity=1000,
+            session_start_equity=1000,
+            high_water_mark=1000,
+            available_cash=1000,
+        ),
+    )
+    coordinator.activate_execution_authorization("test-activate")
+    return coordinator, store, ledger
+
+
+def test_reconcile_state_conflict_halts(tmp_path):
+    # M23: the provider contradicting the durable intent (ACCEPTED ->
+    # UNKNOWN for the same provider order) halts instead of overwriting.
+    coordinator, store, ledger = live_coordinator(tmp_path, VanishingReconcileBroker())
+    coordinator.submit(request(), live_risk(request()))
+
+    with pytest.raises(RuntimeError, match="EXECUTION_RECONCILE_STATE_CONFLICT"):
+        coordinator.reconcile(["broker-1"])
+
+    assert store.is_halted()
+    assert "EXECUTION_RECONCILE_STATE_CONFLICT" in store.halt_reason()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_RECONCILE_STATE_CONFLICT:consistency-1"
+        in event.payload["errors"]
+        for event in ledger.read()
+    )
+
+
+class InstantFillBroker(DisabledBroker):
+    """Fills immediately; discovery then reports a stale ACCEPTED state."""
+
+    mode = BrokerMode.LIVE
+
+    def submit(self, request):
+        return BrokerOrderResult(
+            accepted=True,
+            broker_order_id="broker-1",
+            status=BrokerOrderStatus.FILLED,
+            message="FILLED",
+            filled_quantity=1.0,
+            remaining_quantity=0.0,
+        )
+
+    def discover_open_orders(self):
+        from atlab.broker import BrokerDiscoveredOrder
+
+        return (
+            BrokerDiscoveredOrder(
+                idempotency_key="consistency-1",
+                result=BrokerOrderResult(
+                    accepted=True,
+                    broker_order_id="broker-1",
+                    status=BrokerOrderStatus.ACCEPTED,
+                    message="STALE_ACCEPTED",
+                ),
+            ),
+        )
+
+
+def test_discovery_terminal_state_conflict_halts(tmp_path):
+    # M23 sibling: a terminal durable state (FILLED) contradicted by a
+    # discovered provider state (ACCEPTED) halts instead of regressing.
+    coordinator, store, ledger = live_coordinator(tmp_path, InstantFillBroker())
+    coordinator.submit(request(), live_risk(request()))
+    assert store.get("consistency-1").status is BrokerOrderStatus.FILLED
+
+    with pytest.raises(RuntimeError, match="EXECUTION_PROVIDER_STATE_CONFLICT"):
+        coordinator.reconcile_discovered_orders()
+
+    assert store.is_halted()
+    assert "EXECUTION_PROVIDER_STATE_CONFLICT" in store.halt_reason()
+    assert any(
+        event.event_type == "EXECUTION_HALT_ASSERTED"
+        and "EXECUTION_PROVIDER_STATE_CONFLICT:consistency-1"
+        in event.payload["errors"]
+        for event in ledger.read()
+    )

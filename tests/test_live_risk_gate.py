@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -732,3 +732,195 @@ def test_paper_fill_does_not_touch_live_risk_state(tmp_path):
 
     with pytest.raises(RuntimeError, match="LIVE_RISK_STATE_NOT_INITIALIZED"):
         store.get_live_risk_state()
+
+
+# --- M1/M2/M22: authorization freshness at the broker boundary. ---
+
+
+def make_unseeded_coordinator(tmp_path, broker=None, provider=None):
+    """Coordinator without a pre-seeded LIVE risk basis.
+
+    Unlike make_coordinator, the authoritative risk state/limits are NOT
+    initialized, so _ensure_live_risk_basis must consult the provider.
+    """
+    broker = broker or CountingLiveBroker()
+    db = tmp_path / "execution.sqlite3"
+    store = ExecutionIntentStore(db)
+    ledger = ImmutableLedger(db)
+    instance = ExecutionCoordinator(
+        store,
+        broker,
+        ledger,
+        authorization=authorization(),
+        compliance=ComplianceEngine(
+            CompliancePolicy(policy_id="test-policy", version="1")
+        ),
+        risk=DeterministicRiskEngine(),
+        risk_state_provider=provider,
+    )
+    instance.activate_execution_authorization("test-activate")
+    return instance, store, ledger, broker
+
+
+def test_live_prepare_without_risk_state_provider_is_blocked(tmp_path):
+    # M22: no provider and no seeded basis -> fail closed before any broker
+    # contact.
+    coordinator, store, _, broker = make_unseeded_coordinator(tmp_path)
+    req = request()
+
+    with pytest.raises(RuntimeError, match="LIVE_RISK_STATE_PROVIDER_REQUIRED"):
+        coordinator.prepare(req, risk_for(req, state()))
+
+    assert broker.submissions == 0
+    assert store.get(req.idempotency_key) is None
+
+
+def test_live_prepare_with_none_risk_state_is_blocked(tmp_path):
+    # M22: a provider that returns None is the same as no provider.
+    coordinator, store, _, broker = make_unseeded_coordinator(
+        tmp_path, provider=lambda req: None
+    )
+    req = request()
+
+    with pytest.raises(RuntimeError, match="LIVE_RISK_STATE_PROVIDER_REQUIRED"):
+        coordinator.prepare(req, risk_for(req, state()))
+
+    assert broker.submissions == 0
+    assert store.get(req.idempotency_key) is None
+
+
+def _tampered_binding(store, key, expires_iso):
+    """Binding matching the stored intent, with a tampered expires_at.
+
+    The store first requires the passed binding to equal the stored
+    binding, so the expiry is tampered in the stored row itself — this is
+    exactly the "authorization expired between prepare and acquire"
+    scenario M2 hardens.
+    """
+    connection = store._connect()
+    try:
+        connection.execute(
+            "UPDATE execution_intents SET authorization_expires_at = ? "
+            "WHERE idempotency_key = ?",
+            (expires_iso, key),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    intent = store.get(key)
+    return (
+        intent.authorization_id,
+        intent.authorization_fingerprint,
+        intent.authorization_issued_at,
+        expires_iso,
+        intent.authorization_signature,
+    )
+
+
+def test_acquire_live_execution_authority_rejects_expired_authorization(tmp_path):
+    # M2: expiry is enforced in the store layer, not just in coordinator
+    # pre-checks.
+    coordinator, store, _, _, snapshot = make_coordinator(tmp_path)
+    req = request()
+    risk = risk_for(req, snapshot)
+    coordinator.prepare(req, risk)
+    expired_iso = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    binding = _tampered_binding(store, req.idempotency_key, expired_iso)
+
+    connection = coordinator._transaction()
+    try:
+        with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_EXPIRED"):
+            store._acquire_live_execution_authority_in_connection(
+                connection, req, binding, risk
+            )
+    finally:
+        try:
+            connection.execute("ROLLBACK")
+        finally:
+            connection.close()
+
+
+def test_acquire_live_execution_authority_rejects_malformed_expiry(tmp_path):
+    coordinator, store, _, _, snapshot = make_coordinator(tmp_path)
+    req = request()
+    risk = risk_for(req, snapshot)
+    coordinator.prepare(req, risk)
+    binding = _tampered_binding(store, req.idempotency_key, "not-a-timestamp")
+
+    connection = coordinator._transaction()
+    try:
+        with pytest.raises(
+            RuntimeError, match="EXECUTION_AUTHORIZATION_EXPIRY_INVALID"
+        ):
+            store._acquire_live_execution_authority_in_connection(
+                connection, req, binding, risk
+            )
+    finally:
+        try:
+            connection.execute("ROLLBACK")
+        finally:
+            connection.close()
+
+
+def test_acquire_live_execution_authority_rejects_naive_expiry(tmp_path):
+    # A timezone-naive timestamp cannot be compared against the clock: fail
+    # closed rather than guessing a timezone.
+    coordinator, store, _, _, snapshot = make_coordinator(tmp_path)
+    req = request()
+    risk = risk_for(req, snapshot)
+    coordinator.prepare(req, risk)
+    binding = _tampered_binding(store, req.idempotency_key, "2026-09-25T12:00:00")
+
+    connection = coordinator._transaction()
+    try:
+        with pytest.raises(
+            RuntimeError, match="EXECUTION_AUTHORIZATION_EXPIRY_INVALID"
+        ):
+            store._acquire_live_execution_authority_in_connection(
+                connection, req, binding, risk
+            )
+    finally:
+        try:
+            connection.execute("ROLLBACK")
+        finally:
+            connection.close()
+
+
+def test_live_submit_reverifies_authorization_before_broker_contact(
+    tmp_path, monkeypatch
+):
+    # M1: a revocation landing in the window between the in-transaction
+    # authority re-acquire and broker.submit must fail closed here instead
+    # of submitting.
+    coordinator, store, _, broker, snapshot = make_coordinator(tmp_path)
+    req = request()
+    risk = risk_for(req, snapshot)
+
+    armed = {}
+    real_acquire = store._acquire_live_execution_authority_in_connection
+
+    def acquire_then_revoke(connection, acquire_request, binding, risk_decision):
+        outcome = real_acquire(connection, acquire_request, binding, risk_decision)
+        armed["revoked"] = True
+        return outcome
+
+    real_active = store.authorization_is_active
+
+    def fail_after_acquire(authorization_id):
+        if armed.get("revoked"):
+            return False
+        return real_active(authorization_id)
+
+    monkeypatch.setattr(
+        store, "_acquire_live_execution_authority_in_connection", acquire_then_revoke
+    )
+    monkeypatch.setattr(store, "authorization_is_active", fail_after_acquire)
+
+    with pytest.raises(RuntimeError, match="EXECUTION_AUTHORIZATION_NOT_ACTIVATED"):
+        coordinator.submit(req, risk)
+
+    assert armed.get("revoked") is True
+    assert broker.submissions == 0
+    intent = store.get(req.idempotency_key)
+    assert intent is not None
+    assert intent.result is None

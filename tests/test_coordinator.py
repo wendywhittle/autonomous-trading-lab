@@ -1233,3 +1233,92 @@ def test_coordinator_result_recommit_with_flipped_types_is_idempotent(tmp_path):
         event for event in ledger.read() if event.event_type == "EXECUTION_RESULT"
     ]
     assert len(result_events) == 1
+
+
+# --- M20/M21/M23: audit-conflict and recovery-guard branches. ---
+
+
+def test_conflicting_compliance_audit_event_is_detected(tmp_path):
+    # M20: a planted COMPLIANCE_DECISION with the same event id but a
+    # different payload must surface as a conflict, not a silent overwrite.
+    coordinator_instance, _, ledger = coordinator(tmp_path, DisabledBroker())
+    order_request = req()
+    decision = coordinator_instance.compliance.evaluate(order_request, BrokerMode.PAPER)
+    event_id = coordinator_instance._compliance_event_id(order_request, decision)
+    ledger.append("COMPLIANCE_DECISION", event_id, {"tampered": True})
+
+    with pytest.raises(ValueError, match="COMPLIANCE_AUDIT_EVENT_CONFLICT"):
+        coordinator_instance.prepare(order_request)
+
+
+def test_compliance_audit_event_type_conflict_is_detected(tmp_path):
+    # M20 sibling: the same event id claimed by a different event type.
+    coordinator_instance, _, ledger = coordinator(tmp_path, DisabledBroker())
+    order_request = req()
+    decision = coordinator_instance.compliance.evaluate(order_request, BrokerMode.PAPER)
+    event_id = coordinator_instance._compliance_event_id(order_request, decision)
+    ledger.append(
+        "EXECUTION_INTENT_CREATED", event_id, {"decision_id": order_request.idempotency_key}
+    )
+
+    with pytest.raises(ValueError, match="COMPLIANCE_AUDIT_EVENT_CONFLICT"):
+        coordinator_instance.prepare(order_request)
+
+
+def test_conflicting_execution_audit_event_is_detected(tmp_path):
+    # M21: a planted EXECUTION_RESULT with the same event id but a
+    # different payload must surface as a conflict.
+    coordinator_instance, _, ledger = coordinator(tmp_path, DisabledBroker())
+    coordinator_instance.prepare(req())
+    result = BrokerOrderResult(
+        accepted=True,
+        broker_order_id="broker-1",
+        status=BrokerOrderStatus.ACCEPTED,
+        message="ACCEPTED",
+    )
+    event_id = coordinator_instance._result_event_id(
+        "EXECUTION_RESULT", "intent-1", result
+    )
+    ledger.append("EXECUTION_RESULT", event_id, {"tampered": True})
+
+    with pytest.raises(ValueError, match="EXECUTION_AUDIT_EVENT_CONFLICT"):
+        coordinator_instance._commit_result("intent-1", result, "EXECUTION_RESULT")
+
+
+def test_provider_recovery_duplicate_key_is_detected(tmp_path):
+    # M23: the provider returning two results for the same idempotency key
+    # is a recovery conflict, not two recoveries.
+    class DuplicateRecoveryBroker(CrashAfterAcceptanceBroker):
+        def reconcile_by_idempotency_keys(self, idempotency_keys):
+            single = super().reconcile_by_idempotency_keys(idempotency_keys)
+            return single + single
+
+    coordinator_instance, store, _ = coordinator(tmp_path, DuplicateRecoveryBroker())
+    coordinator_instance.submit(req())
+    assert store.unknown_keys() == ("intent-1",)
+
+    with pytest.raises(ValueError, match="EXECUTION_RECOVERY_DUPLICATE_KEY"):
+        coordinator_instance.recover_unknown()
+
+
+def test_provider_recovery_state_conflict_is_detected(tmp_path, monkeypatch):
+    # M23: an intent that resolves between the unknown-keys scan and the
+    # broker response must not be overwritten by stale recovery data.
+    import dataclasses
+
+    coordinator_instance, store, _ = coordinator(tmp_path, CrashAfterAcceptanceBroker())
+    coordinator_instance.submit(req())
+    assert store.unknown_keys() == ("intent-1",)
+
+    real_get = store.get
+
+    def raced_get(key):
+        intent = real_get(key)
+        if intent is None:
+            return None
+        return dataclasses.replace(intent, status=BrokerOrderStatus.ACCEPTED)
+
+    monkeypatch.setattr(store, "get", raced_get)
+
+    with pytest.raises(ValueError, match="EXECUTION_RECOVERY_STATE_CONFLICT"):
+        coordinator_instance.recover_unknown()

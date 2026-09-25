@@ -542,3 +542,119 @@ def test_engine_blocks_buy_exceeding_available_cash(tmp_path):
         "DECISION",
         "RISK_BLOCK",
     ]
+
+
+# --- M25: seed-ledger restart paths (duplicate DECISION/ORDER, KILL_SWITCH). ---
+
+
+def test_restart_skips_cycle_with_existing_decision_and_order(tmp_path):
+    # M25: a previous run that persisted DECISION + ORDER for a decision must
+    # not re-execute or double-fill it on restart.
+    from atlab.models import OrderStatus, PaperOrder
+
+    observations = [obs(100, 1), obs(101, 2)]
+    pre_state = build_state(observations[:2], as_of=observations[1].timestamp)
+    decision = make_decision(strategy(), pre_state)
+    assert decision.action.value == "ENTER"
+
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    ledger.append("DECISION", decision.decision_id, decision.model_dump(mode="json"))
+    order = PaperOrder(
+        order_id=f"paper-{decision.decision_id}",
+        decision_id=decision.decision_id,
+        symbol=decision.symbol,
+        side=decision.side,
+        quantity=2,
+        fill_price=101,
+        notional=202,
+        status=OrderStatus.FILLED,
+    )
+    ledger.append("ORDER", order.order_id, order.model_dump(mode="json"))
+
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+        quantity=2,
+    )
+    results = engine.run("TEST")
+
+    assert results == ()
+    order_events = [e for e in ledger.read() if e.event_type == "ORDER"]
+    assert len(order_events) == 1
+    assert engine.portfolio.position_quantity == 0
+    assert engine.portfolio.cash == 1000
+
+
+def test_restart_reexecutes_decision_missing_order_exactly_once(tmp_path):
+    # M25: a DECISION with no ORDER (crash between decision append and fill)
+    # re-executes on restart and appends exactly one ORDER.
+    observations = [obs(100, 1), obs(101, 2)]
+    pre_state = build_state(observations[:2], as_of=observations[1].timestamp)
+    decision = make_decision(strategy(), pre_state)
+    assert decision.action.value == "ENTER"
+
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    ledger.append("DECISION", decision.decision_id, decision.model_dump(mode="json"))
+
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+        quantity=2,
+    )
+    results = engine.run("TEST")
+
+    assert len(results) == 1
+    assert results[0].order is not None
+    assert results[0].order.order_id == f"paper-{decision.decision_id}"
+    order_events = [e for e in ledger.read() if e.event_type == "ORDER"]
+    assert len(order_events) == 1
+    decision_events = [e for e in ledger.read() if e.event_type == "DECISION"]
+    assert len(decision_events) == 1
+    assert engine.portfolio.position_quantity == 2
+    assert engine.portfolio.cash == pytest.approx(798)
+
+
+def test_kill_switch_appended_after_mid_run_execution_failure(tmp_path):
+    # M25: when execution fails with KILL_SWITCH_ACTIVE mid-run (after an
+    # earlier cycle already filled), the KILL_SWITCH event is appended for
+    # that decision and the failure propagates.
+    observations = [obs(100, 1), obs(101, 2), obs(102, 3)]
+    ledger = ImmutableLedger(tmp_path / "ledger.sqlite3")
+    engine = PaperTradingEngine(
+        InMemoryMarketData(observations),
+        strategy(),
+        DeterministicRiskEngine(),
+        PaperPortfolio(1000),
+        ledger,
+        quantity=2,
+    )
+    real_submit = engine.execution.submit
+    calls = {"n": 0}
+
+    def fail_on_second_submit(decision, quantity, price):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("KILL_SWITCH_ACTIVE")
+        return real_submit(decision, quantity, price)
+
+    engine.execution.submit = fail_on_second_submit
+
+    with pytest.raises(RuntimeError, match="KILL_SWITCH_ACTIVE"):
+        engine.run("TEST")
+
+    assert calls["n"] == 2
+    kill_events = [e for e in ledger.read() if e.event_type == "KILL_SWITCH"]
+    assert len(kill_events) == 1
+    assert kill_events[0].event_id.startswith("kill-")
+    assert kill_events[0].payload["reason"] == "KILL_SWITCH_ACTIVE"
+    assert kill_events[0].payload["decision_id"] == kill_events[0].event_id[len("kill-"):]
+    # The first cycle's fill stands; the failed cycle left no ORDER.
+    assert engine.portfolio.position_quantity == 2
+    order_events = [e for e in ledger.read() if e.event_type == "ORDER"]
+    assert len(order_events) == 1
