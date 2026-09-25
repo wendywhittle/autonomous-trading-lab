@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,8 @@ def run_paper_backtest(
     *,
     starting_cash: float = 10_000.0,
     quantity: float = 1.0,
+    quantity_policy: Callable[[float], float] | None = None,
+    stop_loss: float | None = None,
     risk: DeterministicRiskEngine | None = None,
     workdir: str | Path | None = None,
     periods_per_year: float = 252.0,
@@ -109,6 +112,8 @@ def run_paper_backtest(
             PaperPortfolio(starting_cash),
             ImmutableLedger(workdir_path / "ledger.sqlite3"),
             quantity=quantity,
+            quantity_policy=quantity_policy,
+            stop_loss=stop_loss,
             mode=TradingMode.PAPER,
             portfolio_state_path=workdir_path / "portfolio.json",
             risk_state_path=workdir_path / "risk_session.json",
