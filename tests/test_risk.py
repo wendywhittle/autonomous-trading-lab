@@ -98,7 +98,7 @@ def test_risk_evidence_fields_are_immutable():
         ("side", Side.SELL),
         ("engine_version", "tampered"),
     ):
-        with __import__("pytest").raises(Exception):
+        with pytest.raises((ValidationError, TypeError)):
             result.__setattr__(field, value)
 
 
@@ -266,3 +266,49 @@ def test_tampered_risk_evidence_is_rejected():
     tampered = signed.model_copy(update={"price": 101})
     with pytest.raises(RuntimeError, match="RISK_EVIDENCE_TAMPERED"):
         DeterministicRiskEngine.validate_evidence(tampered)
+
+
+def sell_decision():
+    return JEVDecision(
+        decision_id="d-sell",
+        strategy_id="s",
+        strategy_version="1",
+        symbol="TEST",
+        action=DecisionAction.EXIT,
+        side=Side.SELL,
+        confidence=1,
+        rationale="test",
+        state_fingerprint="state",
+        created_at=datetime.now(UTC),
+    )
+
+
+def test_loss_halts_never_block_exits():
+    # A SELL only reduces exposure, so the daily-loss and drawdown halts
+    # must not trap the system in a bleeding position -- the stop-loss exit
+    # has to get through even while new entries are halted.
+    engine = DeterministicRiskEngine()
+    daily = engine.evaluate(
+        sell_decision(), 100, 1, current_position_notional=100,
+        equity=9_000, session_start_equity=10_000, high_water_mark=10_000,
+        available_cash=10_000,
+    )
+    assert daily.approved, daily.reason
+    drawdown = engine.evaluate(
+        sell_decision(), 100, 1, current_position_notional=100,
+        equity=8_500, session_start_equity=10_000, high_water_mark=10_000,
+        available_cash=10_000,
+    )
+    assert drawdown.approved, drawdown.reason
+
+
+def test_loss_halts_still_block_new_entries():
+    engine = DeterministicRiskEngine()
+    assert engine.evaluate(
+        decision(), 100, 1,
+        equity=9_000, session_start_equity=10_000, available_cash=10_000,
+    ).reason == "DAILY_LOSS_LIMIT"
+    assert engine.evaluate(
+        decision(), 100, 1,
+        equity=8_500, high_water_mark=10_000, available_cash=10_000,
+    ).reason == "DRAWDOWN_LIMIT"

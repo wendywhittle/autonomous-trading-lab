@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .broker import BrokerOrderRequest, BrokerOrderResult, BrokerOrderStatus
@@ -292,6 +293,19 @@ class ExecutionIntentStore:
             raise ValueError("EXECUTION_INTENT_AUTHORIZATION_CONFLICT")
         auth_row=connection.execute("SELECT active_authorization_id FROM execution_authorization_state WHERE id=1").fetchone()
         if not auth_row or auth_row[0] != authorization_binding[0]: raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
+        # M2: expiry is enforced in the store layer itself, not only in
+        # coordinator pre-checks — any direct caller of this method must
+        # not bypass the expires_at > now requirement. A missing,
+        # malformed, or timezone-naive timestamp fails closed.
+        expires_raw = authorization_binding[3]
+        try:
+            expires_at = datetime.fromisoformat(expires_raw) if isinstance(expires_raw, str) else None
+        except ValueError:
+            expires_at = None
+        if expires_at is None or expires_at.tzinfo is None:
+            raise RuntimeError("EXECUTION_AUTHORIZATION_EXPIRY_INVALID")
+        if expires_at <= datetime.now(UTC):
+            raise RuntimeError("EXECUTION_AUTHORIZATION_EXPIRED")
         if self.is_halted_in_connection(connection): raise RuntimeError("EXECUTION_HALTED")
         return self._record_in_connection(connection,request,authorization_binding,risk_decision,int(state_row[6]),state.fingerprint(),int(limits_row[5]),limits.fingerprint())
 

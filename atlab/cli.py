@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .adapters import CsvMarketData
 from .backtest import run_paper_backtest
+from .charter import CHARTER_STOP_LOSS, charter_limits, charter_quantity_policy
 from .evidence import (
     collect_evidence,
     live_evidence_notes,
@@ -36,8 +37,30 @@ def _strategy(args: argparse.Namespace) -> StrategyVersion:
         strategy_id=args.strategy_id,
         version=args.strategy_version,
         hypothesis=args.hypothesis,
-        parameters={"entry_return": args.entry_return},
+        parameters={
+            "entry_return": args.entry_return,
+            "entry_dip": args.entry_dip,
+            "exit_bounce": args.exit_bounce,
+        },
     )
+
+
+def _risk_engine(args: argparse.Namespace) -> DeterministicRiskEngine:
+    if args.risk_charter:
+        return DeterministicRiskEngine(charter_limits())
+    return DeterministicRiskEngine()
+
+
+def _quantity_policy(args: argparse.Namespace):
+    if args.risk_charter:
+        return charter_quantity_policy()
+    return None
+
+
+def _stop_loss(args: argparse.Namespace):
+    if args.risk_charter:
+        return CHARTER_STOP_LOSS
+    return None
 
 
 def _engine(args: argparse.Namespace, workdir: Path) -> tuple[PaperTradingEngine, str]:
@@ -49,10 +72,12 @@ def _engine(args: argparse.Namespace, workdir: Path) -> tuple[PaperTradingEngine
     engine = PaperTradingEngine(
         data,
         _strategy(args),
-        DeterministicRiskEngine(),
+        _risk_engine(args),
         PaperPortfolio(args.starting_cash),
         ImmutableLedger(workdir / "ledger.sqlite3"),
         quantity=args.quantity,
+        quantity_policy=_quantity_policy(args),
+        stop_loss=_stop_loss(args),
         mode=TradingMode.PAPER,
         portfolio_state_path=workdir / "portfolio.json",
         risk_state_path=workdir / "risk_session.json",
@@ -70,6 +95,14 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--strategy-version", default="1.0.0")
     parser.add_argument("--hypothesis", default="CLI momentum threshold strategy.")
     parser.add_argument("--entry-return", type=float, default=0.001)
+    parser.add_argument("--entry-dip", type=float, default=0.004,
+                        help="Sniper: ENTER/BUY when latest return <= -entry-dip.")
+    parser.add_argument("--exit-bounce", type=float, default=0.003,
+                        help="Sniper: EXIT/SELL when latest return >= exit-bounce.")
+    parser.add_argument("--risk-charter", action="store_true",
+                        help="Enforce Wendy's risk charter v1 ($10/trade, $40 deployed, "
+                             "$15 daily-loss halt, $50 drawdown stop, $5 per-position "
+                             "stop-loss) with $10 target-notional sizing.")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -122,6 +155,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         _strategy(args),
         starting_cash=args.starting_cash,
         quantity=args.quantity,
+        quantity_policy=_quantity_policy(args),
+        stop_loss=_stop_loss(args),
+        risk=_risk_engine(args),
         workdir=workdir,
     )
     metrics = result.metrics

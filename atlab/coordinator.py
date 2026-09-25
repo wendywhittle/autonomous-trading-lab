@@ -166,6 +166,25 @@ class ExecutionCoordinator:
             raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
         return authorization
 
+    def _reverify_authorization_before_submit(
+        self, authorization: ExecutionAuthorization
+    ) -> None:
+        """Re-verify execution authority immediately before broker contact.
+
+        M1: closes the TOCTOU window between the in-transaction authority
+        re-acquire in ``submit()`` and ``broker.submit``. The active
+        authorization id is re-read from the store (fresh, never cached) and
+        the authorization's expiry is re-checked against the clock, so a
+        revocation or expiry landing in that window fails closed here
+        instead of submitting.
+        """
+        if not self.store.authorization_is_active(authorization.authorization_id):
+            if self._authorization_was_revoked(authorization.authorization_id):
+                raise RuntimeError("EXECUTION_AUTHORIZATION_REVOKED")
+            raise RuntimeError("EXECUTION_AUTHORIZATION_NOT_ACTIVATED")
+        if not PromotionGate.validate_authorization(authorization):
+            raise RuntimeError("EXECUTION_AUTHORIZATION_INVALID")
+
     def activate_execution_authorization(self, operator_reference: str) -> None:
         if not operator_reference:
             raise ValueError("EXECUTION_AUTHORIZATION_ACTIVATE_REFERENCE_REQUIRED")
@@ -652,6 +671,12 @@ class ExecutionCoordinator:
             else:
                 connection.close()
                 existing = current
+            # M1: the authority re-acquire above committed in its own
+            # transaction, but broker.submit runs outside any transaction. A
+            # revocation or expiry landing in that window must not result in
+            # a submission, so the authority is re-verified active and fresh
+            # immediately before contacting the broker.
+            self._reverify_authorization_before_submit(authorization)
 
         try:
             result = self.broker.submit(request)

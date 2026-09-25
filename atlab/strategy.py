@@ -4,9 +4,18 @@ import hashlib
 import json
 
 from .models import DecisionAction, JEVDecision, MarketState, Side, StrategyVersion
+from .pairs import PAIRS_STRATEGY_ID, make_pairs_decision
+from .sniper import SNIPER_STRATEGY_ID, make_sniper_decision
 
 
 def make_decision(strategy: StrategyVersion, state: MarketState) -> JEVDecision:
+    # Strategy dispatch: the sniper hunts rapid mean-reversion; pairs-stat-arb
+    # trades cointegration-spread z-scores (long-spread only); every other
+    # strategy_id keeps the original momentum-threshold behavior.
+    if strategy.strategy_id == SNIPER_STRATEGY_ID:
+        return make_sniper_decision(strategy, state)
+    if strategy.strategy_id == PAIRS_STRATEGY_ID:
+        return make_pairs_decision(strategy, state)
     threshold = strategy.parameters.get("entry_return", 0.0)
     latest_return = state.returns[-1] if state.returns else 0.0
     if latest_return > threshold:

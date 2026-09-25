@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -7,7 +10,7 @@ from pathlib import Path
 from .adapters import MarketDataAdapter
 from .jev import JEVAdapter
 from .ledger import ImmutableLedger
-from .models import JEVDecision, PaperOrder, StrategyVersion
+from .models import DecisionAction, JEVDecision, PaperOrder, Side, StrategyVersion
 from .paper import PaperExecution
 from .portfolio import PaperPortfolio
 from .risk import DeterministicRiskEngine
@@ -67,6 +70,9 @@ class PaperTradingEngine:
         ledger: ImmutableLedger,
         *,
         quantity: float = 1.0,
+        quantity_policy: Callable[[float], float] | None = None,
+        stop_loss: float | None = None,
+        stop_cooldown_bars: int = 5,
         kill_switch: bool = False,
         mode: TradingMode = TradingMode.PAPER,
         portfolio_state_path: str | Path | None = None,
@@ -77,12 +83,37 @@ class PaperTradingEngine:
             raise ValueError("PAPER_ENGINE_REQUIRES_PAPER_MODE")
         if quantity <= 0:
             raise ValueError("INVALID_QUANTITY")
+        if stop_loss is not None and stop_loss <= 0:
+            raise ValueError("INVALID_STOP_LOSS")
+        if stop_cooldown_bars < 0:
+            raise ValueError("INVALID_STOP_COOLDOWN")
         self.adapter = adapter
         self.strategy = strategy
         self.risk = risk
         self.portfolio = portfolio
         self.ledger = ledger
         self.quantity = quantity
+        # Optional price -> quantity policy (e.g. the risk charter's $10
+        # target-notional sizing). When set it wins over the fixed quantity,
+        # so every order notional tracks the target regardless of price.
+        self.quantity_policy = quantity_policy
+        # Optional per-position stop-loss (USD of unrealized loss). When set,
+        # a position bleeding past this level is force-exited: the strategy
+        # proposal is overridden with a deterministic EXIT/SELL decision so
+        # the cage — not the strategy — decides when a loser is cut.
+        self.stop_loss = stop_loss
+        # After a stop-loss exit, new entries are suppressed for this many
+        # bars so the strategy cannot immediately re-buy the same falling
+        # knife. In-memory only: a restart resets the cooldown, which is a
+        # bounded behavioral deviation (one extra gated $10 entry at most),
+        # never a safety-gate bypass -- the loss halts stay restart-safe.
+        self.stop_cooldown_bars = stop_cooldown_bars
+        self._stop_cooldown_remaining = 0
+        # Latched while a stop-loss exit is in progress: once the stop
+        # fires, every subsequent cycle keeps exiting until the position is
+        # flat, so a shrinking remainder can never strand a stub whose total
+        # unrealized sits just inside the threshold.
+        self._stop_exiting = False
         self.jev = jev
         self.execution = PaperExecution(kill_switch=kill_switch)
         self.portfolio_state_path = (
@@ -114,6 +145,92 @@ class PaperTradingEngine:
         if self.risk_state_path and self.risk_session is not None:
             self.risk_session.save(self.risk_state_path)
 
+    def _quantity_for(self, price: float) -> float:
+        """Resolve the order quantity for a fill price.
+
+        A quantity policy (e.g. charter $10 target-notional sizing) wins over
+        the fixed quantity. The resolved quantity must always be positive;
+        the risk engine still gates the resulting notional.
+        """
+        quantity = self.quantity_policy(price) if self.quantity_policy else self.quantity
+        if quantity <= 0:
+            raise ValueError("INVALID_QUANTITY")
+        return quantity
+
+    def _stop_loss_decision(self, state) -> JEVDecision | None:
+        """Force an EXIT when the open position's unrealized loss hits the stop.
+
+        Returns None when no stop is configured, no position is open, or the
+        unrealized loss is within tolerance. The synthetic decision is
+        deterministic in the state fingerprint (plus a stop-loss marker), so
+        crash recovery treats it exactly like any other decision.
+        """
+        if self.stop_loss is None:
+            return None
+        position_quantity = self.portfolio.position_quantity
+        if position_quantity <= 0:
+            return None
+        unrealized = (state.price - self.portfolio.average_cost) * position_quantity
+        if not self._stop_exiting and unrealized > -self.stop_loss:
+            return None
+        identity = {
+            "stop_loss": True,
+            "strategy_id": self.strategy.strategy_id,
+            "strategy_version": self.strategy.version,
+            "symbol": state.symbol,
+            "state_fingerprint": state.state_fingerprint,
+            "unrealized": round(unrealized, 6),
+        }
+        decision_id = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return JEVDecision(
+            decision_id=decision_id,
+            strategy_id=self.strategy.strategy_id,
+            strategy_version=self.strategy.version,
+            symbol=state.symbol,
+            action=DecisionAction.EXIT,
+            side=Side.SELL,
+            confidence=1.0,
+            rationale=(
+                f"Stop-loss: unrealized {unrealized:.2f} <= -{self.stop_loss:.2f}; "
+                "cutting the loser regardless of the strategy signal."
+            ),
+            state_fingerprint=state.state_fingerprint,
+        )
+
+    def _stop_cooldown_decision(self, state) -> JEVDecision:
+        # Synthetic HOLD suppressing entries during the post-stop cooldown.
+        # Deterministic in the state fingerprint so crash recovery treats it
+        # like any other decision.
+        decision_id = hashlib.sha256(
+            json.dumps(
+                {
+                    "stop_cooldown": True,
+                    "strategy_id": self.strategy.strategy_id,
+                    "strategy_version": self.strategy.version,
+                    "symbol": state.symbol,
+                    "state_fingerprint": state.state_fingerprint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return JEVDecision(
+            decision_id=decision_id,
+            strategy_id=self.strategy.strategy_id,
+            strategy_version=self.strategy.version,
+            symbol=state.symbol,
+            action=DecisionAction.HOLD,
+            side=None,
+            confidence=1.0,
+            rationale=(
+                "Stop-loss cooldown: no new entries for "
+                f"{self.stop_cooldown_bars} bars after being stopped out."
+            ),
+            state_fingerprint=state.state_fingerprint,
+        )
+
     def run(self, symbol: str) -> tuple[CycleResult, ...]:
         from .state import build_state
         from .strategy import make_decision
@@ -134,7 +251,20 @@ class PaperTradingEngine:
                 observations[: index + 1],
                 as_of=observations[index].timestamp,
             )
+            if self._stop_cooldown_remaining > 0:
+                self._stop_cooldown_remaining -= 1
             proposal = make_decision(self.strategy, state)
+            # The stop-loss overrides the strategy: cutting losers is the
+            # cage's job, and it must work even when the strategy says HOLD.
+            stop_loss_decision = self._stop_loss_decision(state)
+            if stop_loss_decision is not None:
+                proposal = stop_loss_decision
+            elif (
+                self._stop_cooldown_remaining > 0
+                and proposal.action is DecisionAction.ENTER
+            ):
+                # Cooling down after a stop: sit out instead of re-buying.
+                proposal = self._stop_cooldown_decision(state)
             proposal_events = self.ledger.events_for_proposal(proposal.decision_id)
             evaluation_events = [
                 event
@@ -207,6 +337,11 @@ class PaperTradingEngine:
                 )
 
             current_position_notional = self.portfolio.position_quantity * price
+            quantity = self._quantity_for(price)
+            if stop_loss_decision is not None:
+                # A stop-loss exit must always be able to flatten the stub:
+                # never let the $10 sizing strand a smaller remainder.
+                quantity = min(quantity, self.portfolio.position_quantity)
             persisted_evaluation = self._risk_evaluation_for(decision)
             if persisted_evaluation is None:
                 # H6: persist the risk outcome BEFORE any state mutation, so a
@@ -215,7 +350,7 @@ class PaperTradingEngine:
                 fresh_result = self.risk.evaluate(
                     decision,
                     price,
-                    self.quantity,
+                    quantity,
                     current_position_notional,
                     equity=pre_trade_snapshot.equity,
                     session_start_equity=self.risk_session.session_start_equity,
@@ -270,7 +405,7 @@ class PaperTradingEngine:
                     self._persist_state()
                 else:
                     try:
-                        order = self.execution.submit(decision, self.quantity, price)
+                        order = self.execution.submit(decision, quantity, price)
                     except RuntimeError as exc:
                         if str(exc) == "KILL_SWITCH_ACTIVE":
                             self.ledger.append(
@@ -281,6 +416,11 @@ class PaperTradingEngine:
                         raise
 
                     snapshot = self.portfolio.apply(order)
+                    if stop_loss_decision is not None:
+                        self._stop_cooldown_remaining = self.stop_cooldown_bars
+                        self._stop_exiting = True
+                    if snapshot.position_quantity <= 0:
+                        self._stop_exiting = False
                     equity = snapshot.equity
                     self.risk_session = RiskSessionState(
                         session_start_equity=self.risk_session.session_start_equity,
@@ -365,7 +505,7 @@ class PaperTradingEngine:
         an order applied before a crash can be reconstructed bit-for-bit for
         ORDER backfill without re-executing.
         """
-        quantity = self.quantity
+        quantity = self._quantity_for(price)
         return PaperOrder(
             order_id=f"paper-{decision.decision_id}",
             decision_id=decision.decision_id,
